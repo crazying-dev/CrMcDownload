@@ -1,0 +1,13 @@
+[project]
+name = "offcraft-server"
+version = "0.1.0"
+description = "CrMcDownload - Minecraft mirror server (proxy + cache)"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+license = { text = "MIT" }
+dependencies = []
+
+[tool.uv]
+# 纯应用工程：不构建 wheel，运行期零第三方依赖
+package = false
+python-preference = "only-system"
