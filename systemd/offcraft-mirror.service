@@ -1,0 +1,23 @@
+[Unit]
+Description=CrMcDownload mirror server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mimi
+Group=mimi
+WorkingDirectory=/home/mimi/offcraft
+EnvironmentFile=/home/mimi/offcraft/.env
+Environment=UV_CACHE_DIR=/var/lib/offcraft-mirror/uv-cache
+ExecStart=/home/mimi/.local/bin/uv run --frozen python -m server_mirror
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/var/lib/offcraft-mirror
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,22 @@
+services:
+  mirror:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: offcraft-mirror:latest
+    container_name: offcraft-mirror
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8081:8081"
+    env_file:
+      - ../.env
+    environment:
+      MIRROR_LISTEN: 0.0.0.0:8081
+      MIRROR_CACHE_DIR: /data
+    volumes:
+      - /var/lib/offcraft-mirror:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8081/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3

@@ -1,0 +1,14 @@
+mc.yjlt.top {
+	encode gzip
+	reverse_proxy 127.0.0.1:8081 {
+		flush_interval -1
+	}
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+	}
+}
+
+# 无子域名时的备选：独立端口
+# :8443 {
+# 	reverse_proxy 127.0.0.1:8081
+# }
