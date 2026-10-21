@@ -1,60 +1,18 @@
-# OffCraft 客户端（CrMcDownload · user 分支）
+# user-downloader（CrMcDownload 客户端·下载与安装）
 
-Minecraft 启动器客户端：从自建镜像下载版本与资源，使用离线账户启动，支持离线包导出/导入。
+负责“把游戏弄到本地”的全部逻辑：
 
-## 分支模型
+- `offcraft/mirror.py`：上游 URL → 镜像地址重写（meta/data/libs/assets/fabric）
+- `offcraft/net/`：SOCKS5 / HTTP CONNECT 代理、并发下载、断点续传、SHA-1 校验、进度与取消
+- `offcraft/meta/`：版本清单、版本 JSON、`inheritsFrom` 合并、`rules` 匹配
+- `offcraft/install/`：安装计划、库与资源下载、版本落盘
+- `offcraft/pack/`：离线包导出/导入
 
-| 分支 | 内容 |
-| --- | --- |
-| `main` | 文档、架构、部署说明 |
-| `user` | 客户端集成（本分支） |
-| `user-downloader` | 镜像重写、代理、下载器、元数据、安装、离线包 |
-| `user-launcher` | 版本解析、rules、classpath、natives、Java、参数、进程 |
-| `user-ui` | tkinter 界面 |
-| `server` / `server-mirror` / `server-deploy` | 镜像服务端与部署 |
-
-每个分支对应一个独立 clone 目录，组件分支只修改互不重叠的路径，合并方向 `user-* → user`。
-
-## 环境要求
-
-- Windows 10/11 x64
-- Python 3.12（`uv` 使用系统解释器，不额外下载）
-- [uv](https://docs.astral.sh/uv/) 0.12+
-
-## 快速开始
+## 开发
 
 ```bash
 uv sync --frozen
-uv run python main.py
+uv run python -m unittest discover -s tests -v
 ```
 
-常用命令：
-
-```bash
-uv run python -m unittest discover -s tests -v   # 单元测试
-uv run pyinstaller OffCraft.spec --noconfirm      # 打包（需系统已装 PyInstaller）
-```
-
-## 配置
-
-默认 `%APPDATA%\OffCraft\config.json`，可用 `--data-dir` 或环境变量 `OFFCRAFT_DATA` 覆盖。
-
-```json
-{
-  "download_base": "https://mc.example.com",
-  "download_token": "",
-  "proxy": "",
-  "max_workers": 8,
-  "username": "Player",
-  "memory_mb": 4096,
-  "game_dir": "C:\\Users\\you\\AppData\\Roaming\\.minecraft"
-}
-```
-
-## 截图
-
-待补充（M4 完成后）。
-
-## 许可证
-
-MIT，见 `LICENSE`。
+依赖方向：本分支不导入 `offcraft.ui` 与 `offcraft.launch`；合并方向 `user-downloader → user`。
