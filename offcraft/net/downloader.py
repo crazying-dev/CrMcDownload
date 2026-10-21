@@ -184,6 +184,7 @@ class Downloader:
         self.progress_interval = progress_interval
         self._ssl = ssl.create_default_context()
         self._last_progress = 0.0
+        self._pool = threading.local()
 
     # ------------------------------------------------------------------ HTTP
     def _headers(self, extra: dict[str, str] | None = None) -> dict[str, str]:
@@ -198,22 +199,73 @@ class Downloader:
             headers.update(extra)
         return headers
 
+    def _pooled(self) -> dict[tuple[str, str, int], http.client.HTTPConnection]:
+        pool = getattr(self._pool, "conns", None)
+        if pool is None:
+            pool = {}
+            self._pool.conns = pool
+        return pool
+
+    def _new_connection(self, scheme: str, host: str, port: int) -> http.client.HTTPConnection:
+        raw = open_tunnel(host, port, self.proxy, self.timeout)
+        if scheme == "https":
+            raw = self._ssl.wrap_socket(raw, server_hostname=host)
+        conn = http.client.HTTPConnection(host, port, timeout=self.timeout)
+        conn.sock = raw
+        return conn
+
     def _open(self, url: str, extra_headers: dict[str, str] | None = None, method: str = "GET"):
         parts = urlsplit(url)
         if parts.scheme not in ("http", "https") or not parts.hostname:
             raise DownloadError(f"非法 URL：{url}")
+        scheme = parts.scheme
         host = parts.hostname
-        port = parts.port or (443 if parts.scheme == "https" else 80)
-        raw = open_tunnel(host, port, self.proxy, self.timeout)
-        if parts.scheme == "https":
-            raw = self._ssl.wrap_socket(raw, server_hostname=host)
-        conn = http.client.HTTPConnection(host, port, timeout=self.timeout)
-        conn.sock = raw
+        port = parts.port or (443 if scheme == "https" else 80)
+        key = (scheme, host, port)
         path = parts.path or "/"
         if parts.query:
             path += "?" + parts.query
-        conn.request(method, path, headers=self._headers(extra_headers))
-        return conn, conn.getresponse()
+        headers = self._headers(extra_headers)
+
+        pool = self._pooled()
+        conn = pool.pop(key, None)
+        reused = conn is not None
+        if conn is None:
+            conn = self._new_connection(scheme, host, port)
+        try:
+            conn.request(method, path, headers=headers)
+            resp = conn.getresponse()
+        except (OSError, http.client.HTTPException):
+            try:
+                conn.close()
+            except OSError:
+                pass
+            if reused:
+                conn = self._new_connection(scheme, host, port)
+                conn.request(method, path, headers=headers)
+                resp = conn.getresponse()
+            else:
+                raise
+        return conn, resp, key
+
+    def _finish(self, conn, resp, key: tuple[str, str, int]) -> None:
+        """响应读完后：可复用则放回连接池，否则关闭。"""
+        if resp.will_close:
+            try:
+                conn.close()
+            except OSError:
+                pass
+            return
+        self._pooled()[key] = conn
+
+    def close(self) -> None:
+        pool = getattr(self._pool, "conns", None) or {}
+        for conn in pool.values():
+            try:
+                conn.close()
+            except OSError:
+                pass
+        pool.clear()
 
     def _request_with_retry(
         self,
@@ -235,16 +287,21 @@ class Downloader:
         raise DownloadError(f"请求失败：{url}（{last}）") from last
 
     def fetch_bytes(self, url: str, *, max_size: int = 64 * 1024 * 1024) -> bytes:
-        conn, resp = self._request_with_retry(url)
+        conn, resp, key = self._request_with_retry(url)
+        reusable = False
         try:
             if resp.status != 200:
                 raise DownloadError(f"HTTP {resp.status}：{url}")
             data = resp.read(max_size + 1)
             if len(data) > max_size:
                 raise DownloadError(f"响应超过 {max_size} 字节：{url}")
+            reusable = True
             return data
         finally:
-            conn.close()
+            if reusable:
+                self._finish(conn, resp, key)
+            else:
+                conn.close()
 
     def fetch_json(self, url: str) -> Any:
         raw = self.fetch_bytes(url)
@@ -265,6 +322,8 @@ class Downloader:
         dest.parent.mkdir(parents=True, exist_ok=True)
         if verify_file(dest, task.sha1, task.size):
             return False
+        if tracker is not None:
+            tracker.file_started(task.name)
         part = dest.with_name(dest.name + ".part")
         last_error: Exception | None = None
         for attempt in range(self.retries + 1):
@@ -303,8 +362,9 @@ class Downloader:
         headers: dict[str, str] = {}
         if offset:
             headers["Range"] = f"bytes={offset}-"
-        conn, resp = self._request_with_retry(task.url, headers)
+        conn, resp, key = self._request_with_retry(task.url, headers)
         written = 0
+        completed = False
         try:
             if resp.status == 416:
                 part.unlink(missing_ok=True)
@@ -333,9 +393,13 @@ class Downloader:
                     if tracker is not None:
                         tracker.add_bytes(len(chunk))
                         self._emit_progress(tracker)
+            completed = True
             return written
         finally:
-            conn.close()
+            if completed and not (cancel is not None and cancel.is_set()):
+                self._finish(conn, resp, key)
+            else:
+                conn.close()
 
     def _emit_progress(self, tracker: ProgressTracker) -> None:
         if self.progress_callback is None:
@@ -376,7 +440,6 @@ class Downloader:
                 if cancel is not None and cancel.is_set():
                     report.failed.append((task, "已取消"))
                     continue
-                tracker.file_started(task.name)
                 future = pool.submit(self.download, task, tracker, cancel)
                 futures[future] = task
             for future in as_completed(futures):
