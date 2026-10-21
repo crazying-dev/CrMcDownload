@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from urllib.parse import urlsplit
 
 __all__ = [
+    "DirectSource",
     "HOST_ROUTES",
     "Mirror",
     "UnknownUpstreamError",
@@ -37,6 +38,26 @@ HOST_ROUTES: dict[str, str] = {
     "resources.download.minecraft.net": "assets",
     "meta.fabricmc.net": "fabric",
 }
+
+
+@dataclass(frozen=True, slots=True)
+class DirectSource:
+    """官方源直连（开发/可直连网络时使用），不改写 URL。"""
+
+    base: str = "https://mojang.com"
+
+    @property
+    def base_url(self) -> str:
+        return self.base
+
+    def rewrite(self, url: str) -> str:
+        return url
+
+    def rewrite_optional(self, url: str | None) -> str | None:
+        return url
+
+    def is_mirror_url(self, url: str) -> bool:  # noqa: ARG002 - 接口一致性
+        return False
 
 
 @dataclass(frozen=True, slots=True)

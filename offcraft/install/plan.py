@@ -241,7 +241,22 @@ def build_plan(
             )
         )
 
+    plan.tasks = _dedupe(plan.tasks)
     return plan
+
+
+def _dedupe(tasks: list[DownloadTask]) -> list[DownloadTask]:
+    """同一目标文件只保留一个任务（版本 JSON 中可能有重复库）。"""
+    seen: dict[Path, DownloadTask] = {}
+    for task in tasks:
+        key = task.dest
+        existing = seen.get(key)
+        if existing is None:
+            seen[key] = task
+            continue
+        if existing.sha1 and task.sha1 and existing.sha1 != task.sha1:
+            raise InstallError(f"同一路径出现不同哈希：{key}")
+    return list(seen.values())
 
 
 def add_asset_objects(plan: InstallPlan, index_data: dict[str, Any], mirror: Mirror) -> None:
