@@ -14,11 +14,12 @@
 
 ```bash
 cd ~
-git clone -b server https://github.com/crazying-dev/CrMcDownload.git offcraft
-cd offcraft
+git clone -b server https://github.com/crazying-dev/CrMcDownload.git CrMCDownload
+cd CrMCDownload
 # 安装 uv（若未安装）
 curl -LsSf https://astral.sh/uv/install.sh | sh
 ~/.local/bin/uv sync --frozen
+~/.local/bin/uv run --frozen main.py   # 前台验证，Ctrl+C 退出
 ```
 
 ## 2. 配置
@@ -76,7 +77,7 @@ curl -I https://mc.yjlt.top/meta/mc/game/version_manifest_v2.json
 或命令行：
 
 ```bash
-uv run python main.py --base https://mc.yjlt.top --token <token> install 1.14
+CrMCDownload.exe --base https://mc.yjlt.top --token <token> install 1.14
 ```
 
 ## 备选：无子域名（独立端口）

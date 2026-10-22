@@ -7,10 +7,10 @@ Wants=network-online.target
 Type=simple
 User=mimi
 Group=mimi
-WorkingDirectory=/home/mimi/offcraft
-EnvironmentFile=/home/mimi/offcraft/.env
+WorkingDirectory=/home/mimi/CrMCDownload
+EnvironmentFile=/home/mimi/CrMCDownload/.env
 Environment=UV_CACHE_DIR=/var/lib/offcraft-mirror/uv-cache
-ExecStart=/home/mimi/.local/bin/uv run --frozen python -m server_mirror
+ExecStart=/home/mimi/.local/bin/uv run --frozen main.py
 Restart=on-failure
 RestartSec=3
 NoNewPrivileges=true
