@@ -278,6 +278,12 @@ def main(argv: list[str] | None = None) -> int:
     config = load_config(args.data_dir)
     if args.dir:
         config.game_dir = args.dir
+    if args.base:
+        config.download_base = args.base
+    if args.proxy:
+        config.proxy = args.proxy
+    if args.token:
+        config.download_token = args.token
     try:
         return int(args.func(args, config))
     except KeyboardInterrupt:
