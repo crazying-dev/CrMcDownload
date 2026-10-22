@@ -31,7 +31,7 @@ def config_dir(explicit: str | Path | None = None) -> Path:
 @dataclass
 class Config:
     schema: int = SCHEMA
-    download_base: str = ""
+    download_base: str = "https://mc.yjlt.top"
     download_token: str = ""
     proxy: str = ""
     max_workers: int = 8
