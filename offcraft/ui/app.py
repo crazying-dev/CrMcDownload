@@ -10,7 +10,9 @@ import json
 import queue
 import sys
 import threading
+import time
 import tkinter as tk
+from collections import deque
 from pathlib import Path
 from tkinter import messagebox, ttk
 
@@ -50,6 +52,8 @@ class LauncherApp:
         self.launch_category = "原版游戏"
         self.download_category = "官方"
         self.nav_buttons: dict[str, tk.Button] = {}
+        self.log_records: deque[tuple[str, str, str]] = deque(maxlen=2000)
+        self.log_view: LogView | None = None
 
         self._build()
         self.refresh_instances()
@@ -66,9 +70,9 @@ class LauncherApp:
     def _build(self) -> None:
         self.root.title(f"{APP_NAME} · CrMcDownload")
         width = min(int(self.config.window.get("w", 1180)), 1000)
-        height = min(int(self.config.window.get("h", 760)), 560)
+        height = min(int(self.config.window.get("h", 760)), 600)
         self.root.geometry(f"{width}x{height}+20+20")
-        self.root.minsize(900, 520)
+        self.root.minsize(900, 560)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.status = tk.StringVar(value="就绪")
 
@@ -94,7 +98,12 @@ class LauncherApp:
             header, text=f"源：{self.config.download_base or '未配置'}", bg=theme.COLORS["panel"],
             fg=theme.COLORS["muted"], font=theme.FONTS["small"],
         )
-        self.source_label.pack(side="right", padx=18)
+        self.source_label.pack(side="right", padx=(0, 18))
+        tk.Button(
+            header, text="日志", bg=theme.COLORS["panel"], fg=theme.COLORS["muted"], bd=0,
+            activebackground=theme.COLORS["panel"], font=theme.FONTS["small"],
+            command=self.open_log_window,
+        ).pack(side="right", padx=8)
 
         self.container = tk.Frame(self.root, bg=theme.COLORS["bg"])
         self.container.pack(fill="both", expand=True)
@@ -104,23 +113,30 @@ class LauncherApp:
             "settings": self._build_settings_page(),
         }
 
-        log_frame = tk.Frame(self.root, bg=theme.COLORS["bg"], height=112)
-        log_frame.pack(fill="x", padx=12, pady=(0, 4))
-        log_frame.pack_propagate(False)
-        bar = tk.Frame(log_frame, bg=theme.COLORS["bg"])
-        bar.pack(fill="x")
-        tk.Label(bar, text="日志", bg=theme.COLORS["bg"], fg=theme.COLORS["muted"],
-                 font=theme.FONTS["small"]).pack(side="left")
-        tk.Button(bar, text="清空", bg=theme.COLORS["bg"], fg=theme.COLORS["muted"], bd=0,
-                  font=theme.FONTS["small"], command=lambda: self.log_view.clear()).pack(side="right")
-        self.log_view = LogView(log_frame)
-        self.log_view.pack(fill="both", expand=True)
-        self.log_view.text.configure(height=4)
-
         tk.Label(
             self.root, textvariable=self.status, bg=theme.COLORS["panel"],
             fg=theme.COLORS["muted"], anchor="w", font=theme.FONTS["small"], padx=14, pady=3,
         ).pack(fill="x", side="bottom")
+
+    def open_log_window(self) -> None:
+        if self.log_view is not None and self.log_view.winfo_exists():
+            self.log_view.master.lift()
+            return
+        window = tk.Toplevel(self.root)
+        window.title("运行日志")
+        window.geometry("760x420")
+        window.configure(bg=theme.COLORS["bg"])
+        view = LogView(window)
+        view.pack(fill="both", expand=True, padx=10, pady=10)
+        for stamp, level, text in self.log_records:
+            view.append(f"[{stamp}] {text}", level)
+        self.log_view = view
+
+    def _append_log(self, level: str, text: str) -> None:
+        stamp = time.strftime("%H:%M:%S")
+        self.log_records.append((stamp, level, text))
+        if self.log_view is not None and self.log_view.winfo_exists():
+            self.log_view.append(f"[{stamp}] {text}", level)
 
     def show_page(self, name: str) -> None:
         if name not in self.pages:
@@ -441,7 +457,7 @@ class LauncherApp:
                 kind, payload = self.events.get_nowait()
                 if kind == "log":
                     level, text = payload  # type: ignore[misc]
-                    self.log_view.append(text, level)
+                    self._append_log(level, text)
                 elif kind == "progress":
                     self._show_progress(payload)  # type: ignore[arg-type]
                 elif kind == "remote":
