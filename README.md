@@ -42,7 +42,7 @@
 cd user
 python main.py                     # 需要 PyQt6
 # 或打包
-pyinstaller CrMCDownload.spec --noconfirm --clean   # dist/CrMCDownload.exe
+pyinstaller CrMCDownload.spec --noconfirm --clean   # dist/CrMCDownload/CrMCDownload.exe
 ```
 
 配置默认在 `%APPDATA%\CrMCDownload\config.json`。
@@ -63,7 +63,7 @@ curl http://127.0.0.1:8081/health
 - Python 3.12 + uv
 - 客户端 GUI：PyQt6
 - 服务端：标准库 `ThreadingHTTPServer`，可选 nginx/Caddy 反代
-- 打包：PyInstaller（单文件 exe，约 36 MB）
+- 打包：PyInstaller（onedir 文件夹分发，免运行期解压）
 
 ## 文档
 
