@@ -11,7 +11,7 @@ ENV PYTHONUNBUFFERED=1 \
 COPY --from=uv /uv /usr/local/bin/uv
 
 WORKDIR /app
-COPY pyproject.toml uv.lock ./
+COPY pyproject.toml uv.lock main.py ./
 COPY server_mirror ./server_mirror
 
 RUN uv sync --frozen --no-dev
@@ -19,4 +19,4 @@ RUN uv sync --frozen --no-dev
 EXPOSE 8081
 VOLUME ["/data"]
 
-CMD ["uv", "run", "--frozen", "python", "-m", "server_mirror"]
+CMD ["uv", "run", "--frozen", "main.py"]
