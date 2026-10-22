@@ -22,6 +22,7 @@ from PyQt6.QtWidgets import (
     QApplication,
     QButtonGroup,
     QCheckBox,
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
@@ -258,94 +259,66 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
 
+        # ---------------- 左栏：账户 + 启动 ----------------
         left = QFrame()
         left.setObjectName("sidebar")
         left.setFixedWidth(self._left_width)
         left_layout = QVBoxLayout(left)
-        left_layout.setContentsMargins(8, 8, 8, 8)
-        left_layout.setSpacing(4)
-        left_layout.addWidget(self._muted("游戏"))
-        self.launch_cat_buttons: dict[str, QPushButton] = {}
-        self._launch_group = QButtonGroup(self)
-        self._launch_group.setExclusive(True)
-        for category in LAUNCH_CATEGORIES:
-            button = QPushButton(category)
-            button.setCheckable(True)
-            button.setObjectName("flat")
-            button.clicked.connect(lambda _c, name=category: self._select_launch_category(name))
-            self._launch_group.addButton(button)
-            left_layout.addWidget(button)
-            self.launch_cat_buttons[category] = button
+        left_layout.setContentsMargins(14, 18, 14, 14)
+        left_layout.setSpacing(8)
 
-        left_layout.addSpacing(4)
-        left_layout.addWidget(self._muted("版本"))
-        self.version_search = QLineEdit()
-        self.version_search.setPlaceholderText("搜索版本")
-        self.version_search.textChanged.connect(lambda _t: self._render_launch_list())
-        left_layout.addWidget(self.version_search)
-        self.version_list = QListWidget()
-        self.version_list.currentRowChanged.connect(self._on_instance_select)
-        self.version_list.itemDoubleClicked.connect(lambda _i: self._launch_or_stop())
-        left_layout.addWidget(self.version_list, 1)
+        self.avatar_label = QLabel()
+        self.avatar_label.setPixmap(self._make_avatar(self.config.username))
+        self.avatar_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        left_layout.addWidget(self.avatar_label)
+
+        self.account_name = QLabel(self.config.username)
+        self.account_name.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.account_name.setStyleSheet("background: transparent; font-size: 14pt; font-weight: 700;")
+        left_layout.addWidget(self.account_name)
+
+        hint = self._muted("离线账户")
+        hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        hint.setStyleSheet("background: transparent; color: #6b7280;")
+        left_layout.addWidget(hint)
+
+        edit = QPushButton("切换账户")
+        edit.setObjectName("flat")
+        edit.clicked.connect(self._edit_account)
+        left_layout.addWidget(edit, alignment=Qt.AlignmentFlag.AlignHCenter)
+
+        left_layout.addStretch(1)
+
         self.launch_button = QPushButton("启动游戏")
         self.launch_button.setObjectName("accent")
-        self.launch_button.setFixedHeight(52)
+        self.launch_button.setFixedHeight(54)
         self.launch_button.clicked.connect(self._launch_or_stop)
         left_layout.addWidget(self.launch_button)
 
+        # ---------------- 右栏：版本 / Mod / 存档 / Java ----------------
         right = QFrame()
         right.setObjectName("card")
         right_layout = QVBoxLayout(right)
         right_layout.setContentsMargins(12, 10, 12, 10)
         right_layout.setSpacing(8)
 
-        title_row = QHBoxLayout()
-        self.detail_title = QLabel("未选择版本")
-        self.detail_title.setObjectName("title")
-        title_row.addWidget(self.detail_title)
-        self.detail_loader = QLabel("")
-        self.detail_loader.setObjectName("muted")
-        title_row.addWidget(self.detail_loader)
-        title_row.addStretch(1)
-        open_dir = QPushButton("打开目录")
-        open_dir.setObjectName("flat")
-        open_dir.clicked.connect(self.open_game_dir)
-        title_row.addWidget(open_dir)
-        right_layout.addLayout(title_row)
+        header = QHBoxLayout()
+        self.version_combo = QComboBox()
+        self.version_combo.setMinimumWidth(190)
+        self.version_combo.setStyleSheet("font-size: 14pt; font-weight: 700; padding: 4px 8px;")
+        self.version_combo.currentIndexChanged.connect(self._on_version_changed)
+        header.addWidget(self.version_combo)
+        loader = self._muted("")
+        header.addWidget(loader)
+        header.addStretch(1)
+        self.dir_button = QPushButton("版本目录")
+        self.dir_button.setObjectName("flat")
+        self.dir_button.setToolTip("点击打开当前版本目录")
+        self.dir_button.clicked.connect(self._open_version_dir)
+        header.addWidget(self.dir_button)
+        right_layout.addLayout(header)
 
-        info = QFrame()
-        info.setObjectName("card")
-        grid = QGridLayout(info)
-        grid.setContentsMargins(0, 0, 0, 0)
-        grid.setHorizontalSpacing(10)
-        grid.setVerticalSpacing(4)
-        self.detail_labels: dict[str, QLabel] = {}
-        for row, (title, key) in enumerate((("Java 路径", "java"), ("版本路径", "path"))):
-            grid.addWidget(self._muted(title), row, 0, alignment=Qt.AlignmentFlag.AlignTop)
-            value = QLabel("-")
-            grid.addWidget(value, row, 1)
-            self.detail_labels[key] = value
-        grid.setColumnStretch(1, 1)
-        right_layout.addWidget(info)
-
-        account = QHBoxLayout()
-        account.addWidget(self._muted("玩家名"))
-        self.username_edit = QLineEdit(self.config.username)
-        self.username_edit.setFixedWidth(110)
-        account.addWidget(self.username_edit)
-        account.addSpacing(10)
-        account.addWidget(self._muted("内存 MB"))
-        self.memory_spin = QSpinBox()
-        self.memory_spin.setRange(1024, 32768)
-        self.memory_spin.setSingleStep(512)
-        self.memory_spin.setValue(int(self.config.memory_mb))
-        self.memory_spin.setFixedWidth(90)
-        account.addWidget(self.memory_spin)
-        account.addStretch(1)
-        account.addWidget(self._muted(f"v{__version__}"))
-        right_layout.addLayout(account)
-
-        lists = QVBoxLayout()
+        middle = QHBoxLayout()
         mods_box = QGroupBox("Mod")
         mods_layout = QVBoxLayout(mods_box)
         self.mods_tree = QTreeWidget()
@@ -358,93 +331,89 @@ class MainWindow(QMainWindow):
         self.saves_tree.setHeaderLabels(["存档", "修改时间"])
         self.saves_tree.setRootIsDecorated(False)
         saves_layout.addWidget(self.saves_tree)
-        lists.addWidget(mods_box, 1)
-        lists.addWidget(saves_box, 1)
-        right_layout.addLayout(lists, 1)
+        middle.addWidget(mods_box, 1)
+        middle.addWidget(saves_box, 1)
+        right_layout.addLayout(middle, 1)
 
+        java_box = QGroupBox("Java")
+        java_layout = QHBoxLayout(java_box)
+        self.java_combo = QComboBox()
+        self.java_combo.setMinimumWidth(260)
+        self.java_combo.currentIndexChanged.connect(self._on_java_changed)
+        java_layout.addWidget(self.java_combo, 1)
+        refresh_java = QPushButton("重新检测")
+        refresh_java.setObjectName("flat")
+        refresh_java.clicked.connect(self._refresh_java_combo)
+        java_layout.addWidget(refresh_java)
+        add_java = QPushButton("添加 Java")
+        add_java.setObjectName("flat")
+        add_java.clicked.connect(self._choose_java)
+        java_layout.addWidget(add_java)
+        right_layout.addWidget(java_box)
+
+        self.java_candidates: list = []
         layout.addWidget(left, 2)
         layout.addWidget(right, 3)
-        self._select_launch_category("原版游戏")
         return page
 
-    def _select_launch_category(self, category: str) -> None:
-        self._launch_category = category
-        for name, button in self.launch_cat_buttons.items():
-            button.setChecked(name == category)
-        self._render_launch_list()
+    def _make_avatar(self, name: str):  # noqa: ANN201 - QPixmap
+        from PyQt6.QtCore import QRect
+        from PyQt6.QtGui import QColor, QFont, QPainter, QPixmap
 
-    def _render_launch_list(self) -> None:
-        if not hasattr(self, "version_list"):
-            return
-        self.version_list.blockSignals(True)
-        self.version_list.clear()
-        self._filtered = []
-
-        if self._launch_category == "Java":
-            try:
-                candidates = list_java(self._game_dir())
-            except Exception as exc:  # noqa: BLE001
-                self.log(f"检测 Java 失败：{exc}", "ERROR")
-                candidates = []
-            for java in candidates:
-                self.version_list.addItem(f"{java.label}  ·  {java.source}")
-            self.version_list.blockSignals(False)
-            if candidates:
-                self.version_list.setCurrentRow(0)
-                self._show_java_details(candidates[0])
-            return
-
-        if self._launch_category == "光影":
-            self.version_list.addItem("光影管理将在后续版本提供")
-            self.version_list.blockSignals(False)
-            return
-
-        query = self.version_search.text().strip().lower()
-        for item in self.instances:
-            if self._launch_category == "原版游戏" and item.loader != "原版":
-                continue
-            if self._launch_category == "Mod" and item.loader == "原版":
-                continue
-            if query and query not in item.id.lower() and query not in item.mc_version.lower():
-                continue
-            self._filtered.append(item)
-            self.version_list.addItem(item.id)
-        self.version_list.blockSignals(False)
-        self.status.setText(f"{len(self._filtered)} 个实例")
-        if self._filtered:
-            self.version_list.setCurrentRow(0)
-            self._show_instance_details(self._filtered[0])
-        else:
-            self._detail = None
-            self.detail_title.setText("未选择版本")
-            self.detail_loader.setText("")
-            for label in self.detail_labels.values():
-                label.setText("-")
-            self.mods_tree.clear()
-            self.saves_tree.clear()
-
-    def _on_instance_select(self, row: int) -> None:
-        if self._launch_category == "Java" or row < 0 or row >= len(self._filtered):
-            return
-        self._show_instance_details(self._filtered[row])
+        pix = QPixmap(76, 76)
+        pix.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pix)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setBrush(QColor("#3b6fd4"))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawEllipse(0, 0, 76, 76)
+        painter.setPen(QColor("#ffffff"))
+        font = QFont("Microsoft YaHei UI", 26)
+        font.setBold(True)
+        painter.setFont(font)
+        initial = (name or "?")[0].upper()
+        painter.drawText(QRect(0, 0, 76, 76), Qt.AlignmentFlag.AlignCenter, initial)
+        painter.end()
+        return pix
 
     @staticmethod
-    def _elide(text: str, limit: int = 28) -> str:
+    def _elide(text: str, limit: int = 34) -> str:
         return text if len(text) <= limit else "…" + text[-(limit - 1):]
 
-    def _show_instance_details(self, instance: Instance) -> None:
+    def _reload_versions(self) -> None:
+        if not hasattr(self, "version_combo"):
+            return
+        current = self.version_combo.currentText()
+        self.version_combo.blockSignals(True)
+        self.version_combo.clear()
+        for item in self.instances:
+            self.version_combo.addItem(item.id, item)
+        if current:
+            index = self.version_combo.findText(current)
+            if index >= 0:
+                self.version_combo.setCurrentIndex(index)
+        self.version_combo.blockSignals(False)
+        if self.version_combo.count():
+            self.version_combo.setCurrentIndex(0)
+            self._on_version_changed(0)
+        else:
+            self._detail = None
+            self.dir_button.setText("版本目录")
+            self.mods_tree.clear()
+            self.saves_tree.clear()
+            self.java_combo.clear()
+        self.status.setText(f"{len(self.instances)} 个实例")
+
+    def _on_version_changed(self, index: int) -> None:
+        if index < 0:
+            return
+        instance = self.version_combo.itemData(index)
+        if instance is None:
+            return
         self._detail = instance
-        self.detail_title.setText(instance.id)
-        self.detail_loader.setText(instance.loader)
         version_dir = self._game_dir() / "versions" / instance.id
-        self.detail_labels["path"].setText(self._elide(str(version_dir)))
-        java_text = "未找到"
-        try:
-            java = detect_java(self._game_dir(), instance.java_major)
-            java_text = self._elide(str(java.path))
-        except Exception:  # noqa: BLE001
-            pass
-        self.detail_labels["java"].setText(java_text)
+        self.dir_button.setText(self._elide(str(version_dir), 34))
+        self.dir_button.setToolTip(str(version_dir))
 
         self.mods_tree.clear()
         for folder in (self._game_dir() / "mods", version_dir / "mods"):
@@ -461,15 +430,79 @@ class MainWindow(QMainWindow):
                     except OSError:
                         stamp = "-"
                     self.saves_tree.addTopLevelItem(QTreeWidgetItem([entry.name, stamp]))
+        self._refresh_java_combo()
 
-    def _show_java_details(self, java) -> None:  # noqa: ANN001
-        self._detail = None
-        self.detail_title.setText("Java")
-        self.detail_loader.setText(java.source)
-        self.detail_labels["java"].setText(self._elide(str(java.path)))
-        self.detail_labels["path"].setText(self._elide(str(java.path.parent.parent)))
-        self.mods_tree.clear()
-        self.saves_tree.clear()
+    def _refresh_java_combo(self) -> None:
+        if not hasattr(self, "java_combo"):
+            return
+        self.java_candidates = list_java(self._game_dir())
+        current_required = self._detail.java_major if self._detail else None
+        override = self.config.java_overrides.get("__global__", "")
+        self.java_combo.blockSignals(True)
+        self.java_combo.clear()
+        selected = -1
+        for candidate in self.java_candidates:
+            self.java_combo.addItem(f"Java {candidate.major}  ·  {candidate.source}", str(candidate.path))
+            if override and str(candidate.path).lower() == override.lower():
+                selected = self.java_combo.count() - 1
+            elif selected < 0 and current_required and candidate.major == current_required:
+                selected = self.java_combo.count() - 1
+        if selected >= 0:
+            self.java_combo.setCurrentIndex(selected)
+        self.java_combo.blockSignals(False)
+        if not self.java_candidates:
+            self.java_combo.addItem("未检测到 Java，请添加", "")
+
+    def _on_java_changed(self, index: int) -> None:
+        if index < 0:
+            return
+        path = self.java_combo.itemData(index)
+        if path:
+            self.config.java_overrides["__global__"] = str(path)
+            save_config(self.config, self.data_dir)
+
+    def _choose_java(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "选择 java.exe", "", "Java (java.exe);;所有文件 (*.*)")
+        if not path:
+            return
+        from offcraft.launch.java import probe_java
+
+        major = probe_java(path)
+        if major is None:
+            QMessageBox.warning(self, APP_NAME, "无法识别该 Java，请确认是有效的 java.exe")
+            return
+        self.config.java_overrides["__global__"] = path
+        save_config(self.config, self.data_dir)
+        self._refresh_java_combo()
+        index = self.java_combo.findData(path)
+        if index >= 0:
+            self.java_combo.setCurrentIndex(index)
+        self.log(f"已添加 Java {major}：{path}", "SYSTEM")
+
+    def _open_version_dir(self) -> None:
+        if self._detail is None:
+            return
+        folder = self._game_dir() / "versions" / self._detail.id
+        folder.mkdir(parents=True, exist_ok=True)
+        os.startfile(str(folder))  # type: ignore[attr-defined]
+
+    def _edit_account(self) -> None:
+        from PyQt6.QtWidgets import QInputDialog
+
+        name, ok = QInputDialog.getText(self, "切换账户", "离线用户名（3-16 位字母/数字/下划线）：", text=self.config.username)
+        if not ok or not name.strip():
+            return
+        try:
+            from offcraft.launch.auth import validate_name
+
+            validate_name(name.strip())
+        except ValueError as exc:
+            QMessageBox.warning(self, APP_NAME, str(exc))
+            return
+        self.config.username = name.strip()
+        save_config(self.config, self.data_dir)
+        self.account_name.setText(self.config.username)
+        self.avatar_label.setPixmap(self._make_avatar(self.config.username))
 
     def _launch_or_stop(self) -> None:
         if self.process is not None and self.process.running:
@@ -728,7 +761,7 @@ class MainWindow(QMainWindow):
                     self._render_remote()
                 elif kind == "instances":
                     self.instances = payload  # type: ignore[assignment]
-                    self._render_launch_list()
+                    self._reload_versions()
                 elif kind == "task_started":
                     self.install_button.setEnabled(False)
                     self.cancel_button.setEnabled(True)
@@ -888,9 +921,6 @@ class MainWindow(QMainWindow):
 
     # --------------------------------------------------------------- 启动
     def launch_selected(self) -> None:
-        if self._launch_category == "Java":
-            QMessageBox.information(self, APP_NAME, "当前页是 Java 列表，请切换回实例分类")
-            return
         instance = self._detail
         if instance is None:
             QMessageBox.information(self, APP_NAME, "请先选择一个实例")
