@@ -34,7 +34,7 @@ python main.py
 ```bash
 uv run --frozen python -m unittest discover -s tests -v
 pyinstaller CrMCDownload.spec --noconfirm --clean
-# 产物：dist/CrMCDownload.exe
+# 产物：dist/CrMCDownload/CrMCDownload.exe（文件夹分发）
 ```
 
 ## 配置

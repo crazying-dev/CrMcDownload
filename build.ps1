@@ -13,7 +13,7 @@ if (Get-Command pyinstaller -ErrorAction SilentlyContinue) {
     uv run --with pyinstaller pyinstaller CrMCDownload.spec --noconfirm --clean
 }
 
-$exe = Join-Path $PSScriptRoot 'dist\CrMCDownload.exe'
+$exe = Join-Path $PSScriptRoot 'dist\CrMCDownload\CrMCDownload.exe'
 if (-not (Test-Path $exe)) { throw "打包失败：$exe 不存在" }
 $size = [math]::Round((Get-Item $exe).Length / 1MB, 1)
-Write-Host "== 完成：$exe ($size MB) ==" -ForegroundColor Green
+Write-Host "== 完成：$exe ($size MB，文件夹分发) ==" -ForegroundColor Green

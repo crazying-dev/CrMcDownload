@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller 打包配置：单文件、无控制台窗口、PyQt6 界面。"""
+"""PyInstaller 打包配置：文件夹分发（onedir），避免单文件运行时解压临时目录失败。"""
 
 a = Analysis(
     ["main.py"],
@@ -19,9 +19,8 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.datas,
     [],
+    exclude_binaries=True,
     name="CrMCDownload",
     debug=False,
     bootloader_ignore_signals=False,
@@ -33,5 +32,15 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    version="version_info.txt",
     icon="assets/icon.ico",
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=False,
+    name="CrMCDownload",
 )
