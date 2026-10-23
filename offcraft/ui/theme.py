@@ -254,6 +254,22 @@ QLabel#h3 {{ font-size: 11pt; font-weight: 600; }}
 QLabel#muted {{ color: {MUTED}; font-size: 9pt; }}
 QLabel#mutedSmall {{ color: {MUTED}; font-size: 8pt; }}
 QLabel#heroName {{ font-size: 20pt; font-weight: 700; }}
+QLineEdit#heroName {{
+    font-size: 14pt;
+    font-weight: 700;
+    padding: 4px 8px;
+    border-radius: 10px;
+}}
+QComboBox#heroVersion {{
+    font-size: 13pt;
+    font-weight: 700;
+    padding: 4px 10px;
+    border-radius: 10px;
+}}
+QComboBox#heroVersion QAbstractItemView {{ font-size: 10pt; }}
+QLabel#versionTag {{ color: #B4BCC9; font-size: 8pt; }}
+QListWidget#homeList {{ background: transparent; }}
+QListWidget#homeList::item {{ padding: 6px 4px; border-radius: 7px; }}
 QLabel#status {{ color: {MUTED}; font-size: 9pt; }}
 QLabel#error {{ color: {DANGER}; font-size: 9pt; }}
 QLabel#link {{ color: {ACCENT}; font-size: 9pt; }}
