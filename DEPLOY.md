@@ -104,6 +104,25 @@ curl -s -o /dev/null -w '%{http_code}\n' "https://mc.yjlt.top/forgemaven/net/min
 
 如需改写上游（例如换镜像加速），在 `.env` 里补 `UPSTREAM_FABRICMAVEN` / `UPSTREAM_FORGEMAVEN` / `UPSTREAM_NEOFORGEMAVEN` / `UPSTREAM_MODRINTH` / `UPSTREAM_MODCDN`。
 
+### 容量与并发限制（建议生产环境显式配置）
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `MIRROR_MAX_CACHE_BYTES` | `0`（不限） | 缓存总量上限；超出后按最久未访问（mtime）淘汰。**生产环境必须设置**，例如 `214748364800`（200 GiB） |
+| `MIRROR_MAX_FILE_BYTES` | `1073741824`（1 GiB） | 单个文件入缓存上限；超过的文件仍会正常转发，只是不落盘 |
+| `MIRROR_MAX_UPSTREAM` | `8` | 同时进行的上游回源请求上限，超额请求等待 `MIRROR_UPSTREAM_WAIT` 秒后返回 503 |
+| `MIRROR_UPSTREAM_WAIT` | `30` | 等待回源名额的秒数 |
+| `MIRROR_FLIGHT_WAIT` | `60` | 同一文件已被别的请求下载时，最多等多久再直接读缓存 |
+| `MIRROR_METADATA_TTL` | `600` | 元数据（版本清单、maven `*.xml`、Modrinth API）缓存秒数 |
+| `MIRROR_SWEEP_INTERVAL` | `300` | 过期缓存回收的最小间隔（秒） |
+
+几个行为约定：
+
+- 同一个文件被多个客户端同时请求时只会回源一次（single-flight），其余请求等它落盘后直接读缓存；
+- 过期元数据与残留临时文件由服务端定期清理，不会无限堆积；
+- 磁盘写满时自动清临时文件并压缩缓存到上限的一半，不影响正在传输的响应；
+- `/health` 会返回缓存用量（`cache.bytes` / `cache.max_bytes` / 淘汰与回收累计值）。
+
 ## 备选：无子域名（独立端口）
 
 若暂时不能加 DNS，可让 Caddy 监听 `:8443` 并自签/使用已有证书：
@@ -121,6 +140,7 @@ caddy run --config caddy/Caddyfile --adapter caddyfile
 | 查看状态 | `systemctl status offcraft-mirror` |
 | 查看日志 | `journalctl -u offcraft-mirror -f` |
 | 缓存命中 | `curl -s http://127.0.0.1:8081/metrics` |
+| 缓存用量 | `curl -s http://127.0.0.1:8081/health`（看 `cache` 字段） |
 | 清理缓存 | `sudo rm -rf /var/lib/offcraft-mirror/*`（服务无需重启） |
 | 升级 | `git pull && uv sync --frozen && sudo systemctl restart offcraft-mirror` |
 
