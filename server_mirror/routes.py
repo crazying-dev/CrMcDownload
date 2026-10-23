@@ -21,6 +21,8 @@ _PREFIXES = (
     "assets",
     "fabric",
     "fabricmaven",
+    "forgemaven",
+    "neoforgemaven",
     "modrinth",
     "modcdn",
 )

@@ -54,5 +54,9 @@ class Cache:
         return total
 
 
-def is_metadata(prefix: str) -> bool:
-    return prefix in _METADATA_PREFIXES
+def is_metadata(prefix: str, relative: str = "") -> bool:
+    """元数据类资源（短 TTL）：元数据路由，或 maven 的 ``*.xml`` 索引。"""
+    if prefix in _METADATA_PREFIXES:
+        return True
+    name = str(relative or "").rsplit("/", 1)[-1].lower()
+    return name.endswith(".xml")

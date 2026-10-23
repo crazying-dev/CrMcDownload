@@ -47,6 +47,20 @@ class CacheTest(unittest.TestCase):
         self.assertFalse(is_metadata("modcdn"))
         self.assertFalse(is_metadata("libs"))
 
+    def test_maven_index_is_metadata(self) -> None:
+        self.assertTrue(
+            is_metadata("forgemaven", "net/minecraftforge/forge/maven-metadata.xml")
+        )
+        self.assertTrue(
+            is_metadata("neoforgemaven", "releases/net/neoforged/neoforge/maven-metadata.xml")
+        )
+        self.assertFalse(
+            is_metadata("forgemaven", "net/minecraftforge/forge/1.20.1-47.2.0/x.jar")
+        )
+        self.assertFalse(
+            is_metadata("neoforgemaven", "releases/net/neoforged/neoforge/21.1.72/n.jar")
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

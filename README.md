@@ -38,6 +38,8 @@ curl http://127.0.0.1:8081/health
 | `/assets/` | `resources.download.minecraft.net` | 资源对象 |
 | `/fabric/` | `meta.fabricmc.net` | Fabric loader 元数据 |
 | `/fabricmaven/` | `maven.fabricmc.net` | Fabric/Intermediary jar |
+| `/forgemaven/` | `maven.minecraftforge.net` | Forge 版本索引与安装器依赖 |
+| `/neoforgemaven/` | `maven.neoforged.net` | NeoForge 版本索引与 jar |
 | `/modrinth/` | `api.modrinth.com` | 搜索 / 项目 / 版本（**保留查询串**） |
 | `/modcdn/` | `cdn.modrinth.com` | `.jar` / `.mrpack` / 图标 |
 
@@ -45,7 +47,8 @@ curl http://127.0.0.1:8081/health
 
 - 查询串上限 2048 字节，拒绝反斜杠、NUL 等非法字符；
 - 带查询串的请求缓存键为 `<path>.q<sha1(查询串)[:16]>`，避免不同搜索命中同一缓存；
-- `meta` / `fabric` / `modrinth` 前缀按 `MIRROR_METADATA_TTL` 过期，内容文件长期缓存；
+- `meta` / `fabric` / `modrinth` 前缀按 `MIRROR_METADATA_TTL` 过期；maven 路由下 `*.xml`
+  （`maven-metadata.xml`）也算元数据，其余 jar 长期缓存；
 - 未识别前缀 404，绝不回落到直连。
 
 ## 配置（环境变量）
@@ -57,7 +60,7 @@ curl http://127.0.0.1:8081/health
 | `MIRROR_TOKEN` | 空 | 非空时校验 `X-OffCraft-Token` |
 | `MIRROR_METADATA_TTL` | `600` | 元数据 / Modrinth 响应缓存秒数 |
 | `MIRROR_MAX_CACHE_BYTES` | `0` | 缓存上限，0 = 不限 |
-| `UPSTREAM_META` / `_DATA` / `_LIBS` / `_ASSETS` / `_FABRIC` / `_FABRICMAVEN` / `_MODRINTH` / `_MODCDN` | 官方地址 | 上游，可替换 |
+| `UPSTREAM_META` / `_DATA` / `_LIBS` / `_ASSETS` / `_FABRIC` / `_FABRICMAVEN` / `_FORGEMAVEN` / `_NEOFORGEMAVEN` / `_MODRINTH` / `_MODCDN` | 官方地址 | 上游，可替换 |
 | `UPSTREAM_PROXY` | 空 | 上游代理（如 `socks5h://127.0.0.1:1080`） |
 
 ## 测试
