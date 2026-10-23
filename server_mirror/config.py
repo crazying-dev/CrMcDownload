@@ -16,6 +16,9 @@ DEFAULT_UPSTREAMS = {
     "fabric": "https://meta.fabricmc.net",
     # Fabric 加载器的 jar 依赖
     "fabricmaven": "https://maven.fabricmc.net",
+    # Forge / NeoForge maven（maven-metadata.xml 与安装器依赖）
+    "forgemaven": "https://maven.minecraftforge.net",
+    "neoforgemaven": "https://maven.neoforged.net",
     # Modrinth 搜索/版本 API（保留查询串）
     "modrinth": "https://api.modrinth.com",
     # Modrinth 文件 CDN（.jar / .mrpack / 图标）

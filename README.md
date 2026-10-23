@@ -20,12 +20,14 @@
 | `/assets/` | `resources.download.minecraft.net` |
 | `/fabric/` | `meta.fabricmc.net` |
 | `/fabricmaven/` | `maven.fabricmc.net` |
+| `/forgemaven/` | `maven.minecraftforge.net` |
+| `/neoforgemaven/` | `maven.neoforged.net` |
 | `/modrinth/` | `api.modrinth.com` |
 | `/modcdn/` | `cdn.modrinth.com` |
 
 - **查询串**：`/modrinth/v2/search?query=...&facets=...` 这类请求会把查询串完整转发到上游（上限 2048 字节，
   拒绝反斜杠、NUL 等非法字符）；缓存键追加 `.q<sha1(查询串)[:16]>`，避免不同查询命中同一缓存文件。
-- **缓存分级**：`meta` / `fabric` / `modrinth` 按 `MIRROR_METADATA_TTL` 过期，其余内容文件长期缓存。
+- **缓存分级**：`meta` / `fabric` / `modrinth` 按 `MIRROR_METADATA_TTL` 过期，maven 路由下的 `*.xml` 索引也算元数据，其余内容文件长期缓存。
 - 未识别前缀直接 404，绝不回落到直连。
 
 ## 开发

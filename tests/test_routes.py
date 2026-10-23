@@ -9,6 +9,8 @@ UPSTREAMS = {
     "assets": "https://resources.download.minecraft.net",
     "fabric": "https://meta.fabricmc.net",
     "fabricmaven": "https://maven.fabricmc.net",
+    "forgemaven": "https://maven.minecraftforge.net",
+    "neoforgemaven": "https://maven.neoforged.net",
     "modrinth": "https://api.modrinth.com",
     "modcdn": "https://cdn.modrinth.com",
 }
@@ -70,8 +72,24 @@ class RoutesTest(unittest.TestCase):
     def test_modcdn_file(self) -> None:
         route = resolve("/modcdn/data/abc/versions/1/file.jar", UPSTREAMS)
         self.assertEqual(route.prefix, "modcdn")
+        self.assertEqual(route.upstream_base, "https://cdn.modrinth.com")
         self.assertEqual(route.cache_key, "modcdn/data/abc/versions/1/file.jar")
         self.assertEqual(route.upstream_path, "/data/abc/versions/1/file.jar")
+
+    def test_forge_maven_metadata(self) -> None:
+        route = resolve("/forgemaven/net/minecraftforge/forge/maven-metadata.xml", UPSTREAMS)
+        self.assertEqual(route.prefix, "forgemaven")
+        self.assertEqual(route.upstream_base, "https://maven.minecraftforge.net")
+        self.assertEqual(route.relative, "net/minecraftforge/forge/maven-metadata.xml")
+
+    def test_neoforge_maven_jar(self) -> None:
+        path = "/neoforgemaven/releases/net/neoforged/neoforge/21.1.72/neoforge-21.1.72.jar"
+        route = resolve(path, UPSTREAMS)
+        self.assertEqual(route.prefix, "neoforgemaven")
+        self.assertEqual(route.upstream_base, "https://maven.neoforged.net")
+        self.assertEqual(
+            route.relative, "releases/net/neoforged/neoforge/21.1.72/neoforge-21.1.72.jar"
+        )
 
     def test_rejects_bad_query(self) -> None:
         with self.assertRaises(BadPath):

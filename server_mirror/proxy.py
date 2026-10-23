@@ -101,7 +101,7 @@ class MirrorHandler(BaseHTTPRequestHandler):
             return
 
         cache_path = self.server.cache.path_for(route.cache_key)
-        immutable = not is_metadata(route.prefix)
+        immutable = not is_metadata(route.prefix, route.relative)
         if self.server.cache.is_fresh(cache_path, self.server.settings.metadata_ttl, immutable):
             self.server.metrics.hit()
             self._serve_file(cache_path, head_only, immutable)
@@ -210,7 +210,7 @@ class MirrorHandler(BaseHTTPRequestHandler):
                 value = resp.getheader(name)
                 if value:
                     self.send_header(name, value)
-            immutable = not is_metadata(route.prefix)
+            immutable = not is_metadata(route.prefix, route.relative)
             self.send_header(
                 "Cache-Control",
                 "public, max-age=31536000, immutable" if immutable else "public, max-age=600",
