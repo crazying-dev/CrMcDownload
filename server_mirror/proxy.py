@@ -14,6 +14,7 @@ from pathlib import Path
 
 from server_mirror.cache import Cache, is_metadata
 from server_mirror.config import Settings
+from server_mirror.flight import SingleFlight
 from server_mirror.netproxy import open_upstream
 from server_mirror.routes import BadPath, Route, resolve
 
@@ -64,8 +65,18 @@ class MirrorHTTPServer(ThreadingHTTPServer):
     def __init__(self, address, settings: Settings, cache: Cache | None = None) -> None:
         super().__init__(address, MirrorHandler)
         self.settings = settings
-        self.cache = cache or Cache(settings.cache_dir)
+        self.cache = cache or Cache(
+            settings.cache_dir,
+            max_bytes=settings.max_cache_bytes,
+            max_file_bytes=settings.max_file_bytes,
+        )
         self.metrics = Metrics()
+        self.flight = SingleFlight()
+        self.upstream_slots = (
+            threading.BoundedSemaphore(settings.max_upstreams)
+            if settings.max_upstreams > 0
+            else None
+        )
 
 
 class MirrorHandler(BaseHTTPRequestHandler):
@@ -89,7 +100,14 @@ class MirrorHandler(BaseHTTPRequestHandler):
             self._json(403, {"error": "forbidden"})
             return
         if self.path == "/health":
-            self._json(200, {"status": "ok", **self.server.metrics.snapshot()})
+            self._json(
+                200,
+                {
+                    "status": "ok",
+                    **self.server.metrics.snapshot(),
+                    "cache": self.server.cache.stats(),
+                },
+            )
             return
         if self.path == "/metrics":
             self._text(200, "\n".join(f"{k} {v}" for k, v in self.server.metrics.snapshot().items()))
@@ -102,12 +120,34 @@ class MirrorHandler(BaseHTTPRequestHandler):
 
         cache_path = self.server.cache.path_for(route.cache_key)
         immutable = not is_metadata(route.prefix, route.relative)
-        if self.server.cache.is_fresh(cache_path, self.server.settings.metadata_ttl, immutable):
+        ttl = self.server.settings.metadata_ttl
+        if self.server.cache.is_fresh(cache_path, ttl, immutable):
             self.server.metrics.hit()
             self._serve_file(cache_path, head_only, immutable)
             return
         self.server.metrics.miss()
-        self._proxy(route, cache_path, head_only)
+        # 定期回收过期元数据，避免旧索引把磁盘占死（内部有速率限制）
+        self.server.cache.sweep_expired(ttl, min_interval=self.server.settings.sweep_interval)
+
+        # Range 请求不产生完整缓存，没必要参与单飞
+        if self.headers.get("Range"):
+            self._proxy(route, cache_path, head_only)
+            return
+        event, owner = self.server.flight.begin(route.cache_key)
+        if not owner:
+            # 已有请求在回源：等它写完（有界），然后直接读缓存
+            waited = event.wait(self.server.settings.flight_wait)
+            if waited and self.server.cache.is_fresh(cache_path, ttl, immutable):
+                self.server.metrics.hit()
+                self._serve_file(cache_path, head_only, immutable)
+                return
+            # leader 失败或超时：自己回源（不占单飞名额，靠并发信号量兜底）
+            self._proxy(route, cache_path, head_only)
+            return
+        try:
+            self._proxy(route, cache_path, head_only)
+        finally:
+            self.server.flight.end(route.cache_key)
 
     def _authorized(self) -> bool:
         token = self.server.settings.token
@@ -183,6 +223,22 @@ class MirrorHandler(BaseHTTPRequestHandler):
 
     # ------------------------------------------------------------- upstream
     def _proxy(self, route: Route, cache_path: Path, head_only: bool) -> None:
+        """带并发名额的上游回源（拿不到名额返回 503，不把线程吃满）。"""
+        slots = self.server.upstream_slots
+        acquired = False
+        if slots is not None:
+            acquired = slots.acquire(timeout=self.server.settings.upstream_wait)
+            if not acquired:
+                self.server.metrics.error()
+                self._json(503, {"error": "too many upstream requests"})
+                return
+        try:
+            self._fetch_upstream(route, cache_path, head_only)
+        finally:
+            if acquired:
+                slots.release()
+
+    def _fetch_upstream(self, route: Route, cache_path: Path, head_only: bool) -> None:
         upstream_url = route.upstream_base + route.upstream_path
         headers = {"User-Agent": "OffCraft-Mirror/0.1", "Accept": "*/*"}
         range_header = self.headers.get("Range")
@@ -190,6 +246,7 @@ class MirrorHandler(BaseHTTPRequestHandler):
             headers["Range"] = range_header
         conn = None
         tmp_path: Path | None = None
+        fh = None
         try:
             conn = open_upstream(upstream_url, self.server.settings.proxy, timeout=30)
             conn.request("GET", _path_of(upstream_url), headers=headers)
@@ -220,10 +277,12 @@ class MirrorHandler(BaseHTTPRequestHandler):
             if head_only:
                 return
 
-            cacheable = resp.status == 200
-            fh = None
+            cache = self.server.cache
+            limit = cache.max_file_bytes
+            declared = _as_int(length)
+            cacheable = resp.status == 200 and cache.allows(declared or 0)
             if cacheable:
-                tmp_path, fh = self.server.cache.begin_write(cache_path)
+                tmp_path, fh = cache.begin_write(cache_path)
             written = 0
             try:
                 while True:
@@ -232,15 +291,41 @@ class MirrorHandler(BaseHTTPRequestHandler):
                         break
                     self.wfile.write(chunk)
                     written += len(chunk)
-                    if fh is not None:
+                    if fh is None:
+                        continue
+                    try:
                         fh.write(chunk)
+                    except OSError:
+                        # 磁盘写满：放弃缓存但不影响正在传输的响应
+                        fh.close()
+                        fh = None
+                        cache.abort_write(tmp_path)  # type: ignore[arg-type]
+                        tmp_path = None
+                        cache.free_space()
+                        continue
+                    if limit and written > limit:
+                        # 上游没给 Content-Length 且文件超限：停止缓存
+                        fh.close()
+                        fh = None
+                        cache.abort_write(tmp_path)  # type: ignore[arg-type]
+                        tmp_path = None
             finally:
                 if fh is not None:
                     fh.close()
+                fh = None
             self.server.metrics.add_upstream(written)
-            if cacheable and tmp_path is not None:
-                self.server.cache.commit(tmp_path, cache_path)
-                tmp_path = None
+            if tmp_path is not None:
+                if cache.allows(written):
+                    try:
+                        cache.commit(tmp_path, cache_path, size=written)
+                    except OSError:
+                        cache.abort_write(tmp_path)
+                        cache.free_space()
+                    else:
+                        tmp_path = None
+                else:
+                    cache.abort_write(tmp_path)
+                    tmp_path = None
         except (OSError, http.client.HTTPException) as exc:
             self.server.metrics.error()
             try:
@@ -248,8 +333,13 @@ class MirrorHandler(BaseHTTPRequestHandler):
             except OSError:
                 pass
         finally:
-            if tmp_path is not None and tmp_path.exists():
-                tmp_path.unlink(missing_ok=True)
+            if fh is not None:
+                try:
+                    fh.close()
+                except OSError:
+                    pass
+            if tmp_path is not None:
+                self.server.cache.abort_write(tmp_path)
             if conn is not None:
                 conn.close()
 
@@ -276,6 +366,13 @@ class MirrorHandler(BaseHTTPRequestHandler):
     def _content_type(path: Path) -> str:
         guessed, _ = mimetypes.guess_type(path.name)
         return guessed or "application/octet-stream"
+
+
+def _as_int(value: str | None) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _path_of(url: str) -> str:
