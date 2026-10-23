@@ -96,7 +96,19 @@ python ../devtools/ui_smoke.py                   # 离屏界面自检（断言�
 python ../devtools/ui_shots.py .testbed/shots    # 输出界面截图
 pyinstaller CrMCDownload.spec --noconfirm --clean
 # 产物：dist/CrMCDownload/CrMCDownload.exe（文件夹分发）
+
+powershell -NoProfile -ExecutionPolicy Bypass -File packaging\build_installer.ps1   # 再打安装包（需 Inno Setup 6）
+# 产物：dist/installer/CrMCDownload-<版本>-win64-setup.exe
 ```
+
+安装包口径（自 0.5.3 起）：
+
+- Inno Setup 6，脚本 [`packaging/CrMCDownload.iss`](packaging/CrMCDownload.iss)，版本号从
+  `offcraft/__init__.py` 自动读，编译前校验 exe 的文件版本与脚本一致；
+- 发布者统一为 **Cr**（`AppPublisher` / `VersionInfoCompany` / `UninstallDisplayName`）；
+- 安装包本体带四段式文件信息（`FileVersion` / `ProductVersion` / `ProductName` / `CompanyName` / `Description` / `Copyright`）；
+- 覆盖升级：`AppId` 固定 + 默认目录固定 `%LOCALAPPDATA%\Programs\CrMCDownload` + 文件 `ignoreversion`，
+  新版安装包直接盖在旧版上即可，无需先卸载；旧版正在运行时由 Restart Manager 先关掉。
 
 ## 配置
 
