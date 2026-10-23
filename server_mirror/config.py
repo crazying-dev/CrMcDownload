@@ -8,6 +8,27 @@ from pathlib import Path
 
 __all__ = ["Settings"]
 
+
+def _int(env: dict[str, str], name: str, default: int) -> int:
+    """容错地读整数环境变量（非法值回落默认值，不把服务启崩）。"""
+    raw = (env.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return int(float(raw))
+    except ValueError:
+        return default
+
+
+def _float(env: dict[str, str], name: str, default: float) -> float:
+    raw = (env.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
 DEFAULT_UPSTREAMS = {
     "meta": "https://piston-meta.mojang.com",
     "data": "https://piston-data.mojang.com",
@@ -35,6 +56,16 @@ class Settings:
     proxy: str = ""
     upstreams: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_UPSTREAMS))
     max_cache_bytes: int = 0  # 0 = 不限
+    #: 单个文件超过这个大小就不进缓存（仍会正常转发），默认 1 GiB
+    max_file_bytes: int = 1024 * 1024 * 1024
+    #: 同时进行的上游回源请求上限，0 表示不限
+    max_upstreams: int = 8
+    #: 同一个键正在回源时，其他请求最多等多久（秒）
+    flight_wait: float = 60.0
+    #: 上游并发名额的等待时间（秒），拿不到就返回 503
+    upstream_wait: float = 30.0
+    #: 过期缓存清理的最小间隔（秒）
+    sweep_interval: float = 300.0
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> "Settings":
@@ -48,10 +79,15 @@ class Settings:
             listen=env.get("MIRROR_LISTEN", "127.0.0.1:8081"),
             cache_dir=Path(env.get("MIRROR_CACHE_DIR", "./cache")),
             token=env.get("MIRROR_TOKEN", ""),
-            metadata_ttl=int(env.get("MIRROR_METADATA_TTL", "600")),
+            metadata_ttl=_int(env, "MIRROR_METADATA_TTL", 600),
             proxy=env.get("UPSTREAM_PROXY", ""),
             upstreams=upstreams,
-            max_cache_bytes=int(env.get("MIRROR_MAX_CACHE_BYTES", "0")),
+            max_cache_bytes=_int(env, "MIRROR_MAX_CACHE_BYTES", 0),
+            max_file_bytes=_int(env, "MIRROR_MAX_FILE_BYTES", 1024 * 1024 * 1024),
+            max_upstreams=_int(env, "MIRROR_MAX_UPSTREAM", 8),
+            flight_wait=_float(env, "MIRROR_FLIGHT_WAIT", 60.0),
+            upstream_wait=_float(env, "MIRROR_UPSTREAM_WAIT", 30.0),
+            sweep_interval=_float(env, "MIRROR_SWEEP_INTERVAL", 300.0),
         )
 
     @property
