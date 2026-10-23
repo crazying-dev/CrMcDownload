@@ -3,12 +3,14 @@
 // extracted straight into the target directory, so the setup never needs a
 // writable %TEMP% (unlike Inno Setup / PyInstaller onefile bootstrappers).
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.IO.Compression;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Threading;
 using System.Windows.Forms;
 using Microsoft.Win32;
@@ -111,6 +113,19 @@ namespace CrMcSetup
                     : DoInstall(null, DesktopIcon, LaunchApp, false);
             }
 
+            // 双击运行时先把“环境不让写 C 盘”这类问题摆在面前，
+            // 而不是让用户点完「安装」才看到报错。
+            if (!UninstallMode)
+            {
+                string problem = EnvProblem();
+                if (problem != null)
+                {
+                    MessageBox.Show(problem, BuildInfo.Name + " " + BuildInfo.Version + " 安装程序",
+                        MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return 1;
+                }
+            }
+
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
             using (SetupForm form = new SetupForm(UninstallMode))
@@ -127,6 +142,7 @@ namespace CrMcSetup
             try
             {
                 Report(report, 0, "准备安装…");
+                Preflight();
                 Trace("install start -> " + TargetDir);
                 CloseRunning();
                 Report(report, 3, "正在创建安装目录…");
@@ -182,13 +198,8 @@ namespace CrMcSetup
         // ------------------------------------------------------------------ pieces
         private static void Trace(string text)
         {
-            try
-            {
-                Directory.CreateDirectory(LogDir);
-                File.AppendAllText(Path.Combine(LogDir, "setup-trace.log"),
-                    DateTime.Now.ToString("HH:mm:ss.fff") + "  " + text + Environment.NewLine);
-            }
-            catch (Exception) { }
+            AppendLog("setup-trace.log",
+                DateTime.Now.ToString("HH:mm:ss.fff") + "  " + text + Environment.NewLine);
         }
 
         internal static string LogDir
@@ -201,12 +212,114 @@ namespace CrMcSetup
             }
         }
 
+        internal static string ExeDir
+        {
+            get
+            {
+                try
+                {
+                    return Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
+                }
+                catch (Exception)
+                {
+                    return null;
+                }
+            }
+        }
+
+        // 受限环境下 C:\Users\...\AppData 可能不可写（实测：从 E:\root\WorkSpaces\ 工作区
+        // 启动的程序一律被拒绝写入 C 盘），此时把日志落到安装包所在目录，
+        // 否则用户双击后只会看到「什么都没发生」。
+        private static void AppendLog(string fileName, string text)
+        {
+            string[] dirs = new string[] { LogDir, ExeDir, Path.GetTempPath() };
+            for (int i = 0; i < dirs.Length; i++)
+            {
+                try
+                {
+                    if (string.IsNullOrEmpty(dirs[i])) continue;
+                    Directory.CreateDirectory(dirs[i]);
+                    File.AppendAllText(Path.Combine(dirs[i], fileName), text);
+                    return;
+                }
+                catch (Exception) { }
+            }
+        }
+
+        // 先探测关键位置能不能写，给出可执行的中文提示，
+        // 而不是让用户看到一句 “Access to the path ... is denied”。
+        internal static string EnvProblem()
+        {
+            List<string> bad = new List<string>();
+            string startMenu = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                @"Microsoft\Windows\Start Menu\Programs");
+            ProbeWritable(NearestExisting(TargetDir), TargetDir, bad);
+            ProbeWritable(NearestExisting(LogDir), LogDir, bad);
+            ProbeWritable(NearestExisting(startMenu), startMenu, bad);
+            if (bad.Count == 0) return null;
+
+            StringBuilder sb = new StringBuilder();
+            sb.AppendLine("无法写入以下位置：");
+            for (int i = 0; i < bad.Count; i++) sb.AppendLine("  " + bad[i]);
+            sb.AppendLine();
+            sb.AppendLine("常见原因：安装包被放在了受限目录（例如 E:\\root\\WorkSpaces\\ 下的项目工作区），");
+            sb.AppendLine("从这种目录启动的程序会被系统拒绝写入 C 盘。");
+            sb.AppendLine();
+            sb.AppendLine("解决办法：把安装包复制到「下载」文件夹或桌面，再从那里双击运行。");
+            return sb.ToString().TrimEnd();
+        }
+
+        private static void Preflight()
+        {
+            string problem = EnvProblem();
+            if (problem != null) throw new UnauthorizedAccessException(problem);
+        }
+
+        // 不创建目标目录本身，只探测它最近的已存在上级，
+        // 免得用户点了取消却在磁盘上留下空目录。
+        private static string NearestExisting(string dir)
+        {
+            try
+            {
+                while (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+                {
+                    dir = Path.GetDirectoryName(dir);
+                }
+                return dir;
+            }
+            catch (Exception)
+            {
+                return null;
+            }
+        }
+
+        private static void ProbeWritable(string dir, string label, List<string> bad)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(dir)) return;
+                Directory.CreateDirectory(dir);
+                string probe = Path.Combine(dir, ".crmc-probe.tmp");
+                File.WriteAllText(probe, "ok");
+                File.Delete(probe);
+            }
+            catch (Exception)
+            {
+                string show = string.IsNullOrEmpty(label) ? dir : label;
+                if (!bad.Contains(show)) bad.Add(show);
+            }
+        }
+
         private static void ClearTrace()
         {
             try
             {
                 string p = Path.Combine(LogDir, "setup-trace.log");
                 if (File.Exists(p)) File.Delete(p);
+                // 上一次失败留下的错误日志也别再挂着，以免误导。
+                string e = Path.Combine(LogDir, "setup-error.log");
+                if (File.Exists(e)) File.Delete(e);
             }
             catch (Exception) { }
         }
@@ -217,14 +330,8 @@ namespace CrMcSetup
 
         private static void Fail(Exception ex, bool interactive, string title)
         {
-            try
-            {
-                string dir = LogDir;
-                Directory.CreateDirectory(dir);
-                File.AppendAllText(Path.Combine(dir, "setup-error.log"),
-                    DateTime.Now.ToString("s") + "  " + ex + Environment.NewLine);
-            }
-            catch (Exception) { }
+            AppendLog("setup-error.log",
+                DateTime.Now.ToString("s") + "  " + ex + Environment.NewLine);
             Trace("ERROR " + ex);
             if (interactive)
             {

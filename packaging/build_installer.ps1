@@ -125,3 +125,10 @@ Write-Host ("  ProdVer : " + $info.ProductVersion)
 Write-Host ("  Company : " + $info.CompanyName)
 Write-Host ("  Payload : " + (Get-Item $payload).Length + " bytes (embedded as payload.zip)")
 Write-Host ("  Uninst  : " + (Get-Item $unExe).Length + " bytes (embedded as uninstaller.exe)")
+
+Write-Host ''
+Write-Host 'NOTE: do NOT double-click this setup from the project workspace folder.'
+Write-Host '      Processes started from this workspace are denied writes to C:, so the setup'
+Write-Host '      stops right away (rc=1, no window). Copy it to your Downloads folder first:'
+Write-Host ('      ' + $env:USERPROFILE + '\Downloads\' + (Split-Path $outExe -Leaf))
+Write-Host '      (The setup itself never uses %TEMP%, so any normal folder works.)'

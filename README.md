@@ -111,9 +111,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging\build_installer.ps
 - 安装包本体带四段式文件信息（`FileVersion` / `ProductVersion` / `ProductName` / `CompanyName` / `Copyright`）；
 - 覆盖升级：默认目录固定 `%LOCALAPPDATA%\Programs\CrMCDownload`，重跑新版安装包直接覆盖即可，
   无需先卸载；旧版正在运行时会先尝试关窗口，关不掉则提示用户手动退出；
-- 卸载：安装目录内 `uninstall.exe`（由同一份源码以 `/define:UNINSTALLER` 编译，约 30 KB），
+- 卸载：安装目录内 `uninstall.exe`（与安装器同一份源码编译，约 33 KB，等价于 `setup.exe /UNINSTALL`），
   同时登记 `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\CrMCDownload`，
   在「应用和功能」里可见（发布者 Cr、版本号、图标、卸载命令）；
+- 受限目录自检：若安装包从**受限目录**（例如 `E:\root\WorkSpaces\` 下的项目工作区）启动，
+  Windows 会拒绝该进程写入 C 盘，安装器会在窗口出现时/静默运行时立即给出中文说明
+  （`无法写入以下位置…请把安装包复制到「下载」文件夹或桌面`），并把日志落到安装包同目录；
+  把安装包复制到下载文件夹再双击即可正常安装；
 - 静默安装：`setup.exe /S [/DIR=<目录>] [/NODESKTOPICON] [/NOLAUNCH]`，卸载：`setup.exe /UNINSTALL /S`。
 
 > 注意：布局/临时目录相关的环境故障会让**任何**安装器失败，排查时可先用
