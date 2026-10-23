@@ -219,6 +219,10 @@ QWidget {{
     font-size: 10pt;
 }}
 QMainWindow, QDialog {{ background: {BG}; }}
+QFrame#topbar {{
+    background: {CARD};
+    border-bottom: 1px solid {BORDER};
+}}
 QFrame#sidebar {{
     background: {CARD};
     border-right: 1px solid {BORDER};
@@ -272,6 +276,21 @@ QPushButton#nav {{
     font-size: 10.5pt;
 }}
 QPushButton#nav:hover {{ background: #F1F5FD; color: {TEXT}; }}
+QPushButton#topnav {{
+    background: transparent;
+    border: none;
+    border-radius: 9px;
+    text-align: center;
+    padding: 8px 20px;
+    color: #4B5565;
+    font-size: 10.5pt;
+}}
+QPushButton#topnav:hover {{ background: #F1F5FD; color: {TEXT}; }}
+QPushButton#topnav:checked {{
+    background: {ACCENT_SOFT};
+    color: {ACCENT};
+    font-weight: 700;
+}}
 QPushButton#nav:checked {{
     background: {ACCENT_SOFT};
     color: {ACCENT};
