@@ -36,6 +36,8 @@ class Config:
     proxy: str = ""
     max_workers: int = 8
     skip_assets: bool = False
+    #: 版本隔离：每个版本使用 ``versions/<id>`` 作为游戏目录（mods/存档/配置互不影响）
+    isolation: bool = True
     username: str = "Player"
     memory_mb: int = 4096
     width: int = 854

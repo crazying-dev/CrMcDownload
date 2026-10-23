@@ -11,7 +11,7 @@ from pathlib import Path
 from offcraft.config import Config, load_config, save_config
 from offcraft.install.installer import install, prepare_install
 from offcraft.install.plan import InstallOptions
-from offcraft.instances import discover_instances
+from offcraft.instances import discover_instances, instance_game_dir
 from offcraft.meta.manifest import VersionManifest
 from offcraft.mirror import DirectSource, Mirror
 from offcraft.net.downloader import Downloader, ProgressTracker
@@ -179,6 +179,7 @@ def cmd_launch(args, config: Config) -> int:
 
     options = LaunchOptions(
         memory_mb=args.memory or config.memory_mb,
+        game_dir=str(instance_game_dir(mc_dir, args.version, config.isolation)),
         width=config.width,
         height=config.height,
         fullscreen=config.fullscreen,

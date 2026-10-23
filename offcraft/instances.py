@@ -7,7 +7,13 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-__all__ = ["Instance", "detect_loader", "discover_instances"]
+__all__ = [
+    "Instance",
+    "detect_loader",
+    "discover_instances",
+    "instance_game_dir",
+    "read_pack_metadata",
+]
 
 _VERSION_RE = re.compile(r"^\d+(?:\.\d+)+")
 
@@ -52,6 +58,22 @@ def _mc_version(raw: dict, version_id: str) -> str:
         return str(explicit)
     match = _VERSION_RE.match(version_id)
     return match.group(0) if match else version_id
+
+
+def instance_game_dir(mc_dir: Path | str, version_id: str, isolated: bool = True) -> Path:
+    """版本的专属游戏目录（版本隔离时是 ``versions/<id>``）。"""
+    mc_dir = Path(mc_dir)
+    return mc_dir / "versions" / version_id if isolated else mc_dir
+
+
+def read_pack_metadata(mc_dir: Path | str, version_id: str) -> dict | None:
+    """读取整合包安装时写下的 ``offcraft-pack.json``。"""
+    path = Path(mc_dir) / "versions" / version_id / "offcraft-pack.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def discover_instances(mc_dir: Path | str) -> list[Instance]:

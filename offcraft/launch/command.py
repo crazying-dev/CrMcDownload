@@ -28,6 +28,8 @@ class LaunchError(RuntimeError):
 @dataclass(slots=True)
 class LaunchOptions:
     memory_mb: int = 4096
+    #: 游戏目录（版本隔离时指向 ``versions/<id>``）；为空则使用 mc_dir
+    game_dir: str | None = None
     width: int | None = None
     height: int | None = None
     fullscreen: bool = False
@@ -99,6 +101,7 @@ def _substitutions(
     natives_dir: Path,
 ) -> dict[str, str]:
     separator = ";" if sys.platform == "win32" else ":"
+    game_dir = Path(options.game_dir) if options.game_dir else mc_dir
     return {
         "auth_player_name": profile.name,
         "auth_uuid": profile.uuid,
@@ -109,7 +112,7 @@ def _substitutions(
         "user_type": profile.user_type,
         "version_name": version.id,
         "version_type": version.type,
-        "game_directory": str(mc_dir),
+        "game_directory": str(game_dir),
         "assets_root": str(mc_dir / "assets"),
         "assets_index_name": version.assets,
         "natives_directory": str(natives_dir),
@@ -212,10 +215,12 @@ def build_command(
         game_args.append("--fullscreen")
     game_args.extend(options.extra_game)
 
+    game_dir = Path(options.game_dir) if options.game_dir else mc_dir
+    game_dir.mkdir(parents=True, exist_ok=True)
     argv = [str(java.path), *jvm_args, version.main_class, *game_args]
     return CommandPlan(
         argv=argv,
-        cwd=mc_dir,
+        cwd=game_dir,
         java=java,
         natives_dir=natives_dir,
         classpath=classpath,
