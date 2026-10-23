@@ -1,6 +1,6 @@
 # CrMCDownload 服务端（server 分支）
 
-Minecraft 文件镜像服务：为客户端代理 Mojang / Fabric 元数据与文件，带磁盘缓存、路径白名单与访问令牌。
+Minecraft 文件镜像服务：为客户端代理 Mojang / Fabric / Modrinth 元数据与文件，带磁盘缓存、路径白名单与访问令牌。
 
 ## 分支模型
 
@@ -30,15 +30,23 @@ curl http://127.0.0.1:8081/health
 
 ## 路由
 
-| 前缀 | 上游 |
-| --- | --- |
-| `/meta/` | `piston-meta.mojang.com`、`launchermeta.mojang.com` |
-| `/data/` | `piston-data.mojang.com`、`launcher.mojang.com` |
-| `/libs/` | `libraries.minecraft.net` |
-| `/assets/` | `resources.download.minecraft.net` |
-| `/fabric/` | `meta.fabricmc.net` |
+| 前缀 | 上游 | 说明 |
+| --- | --- | --- |
+| `/meta/` | `piston-meta.mojang.com`、`launchermeta.mojang.com` | 版本清单 / 版本 JSON |
+| `/data/` | `piston-data.mojang.com`、`launcher.mojang.com` | client jar 等 |
+| `/libs/` | `libraries.minecraft.net` | 库文件 |
+| `/assets/` | `resources.download.minecraft.net` | 资源对象 |
+| `/fabric/` | `meta.fabricmc.net` | Fabric loader 元数据 |
+| `/fabricmaven/` | `maven.fabricmc.net` | Fabric/Intermediary jar |
+| `/modrinth/` | `api.modrinth.com` | 搜索 / 项目 / 版本（**保留查询串**） |
+| `/modcdn/` | `cdn.modrinth.com` | `.jar` / `.mrpack` / 图标 |
 
 另有 `/health`、`/metrics`。
+
+- 查询串上限 2048 字节，拒绝反斜杠、NUL 等非法字符；
+- 带查询串的请求缓存键为 `<path>.q<sha1(查询串)[:16]>`，避免不同搜索命中同一缓存；
+- `meta` / `fabric` / `modrinth` 前缀按 `MIRROR_METADATA_TTL` 过期，内容文件长期缓存；
+- 未识别前缀 404，绝不回落到直连。
 
 ## 配置（环境变量）
 
@@ -47,8 +55,16 @@ curl http://127.0.0.1:8081/health
 | `MIRROR_LISTEN` | `127.0.0.1:8081` | 监听地址 |
 | `MIRROR_CACHE_DIR` | `./cache` | 磁盘缓存目录 |
 | `MIRROR_TOKEN` | 空 | 非空时校验 `X-OffCraft-Token` |
-| `UPSTREAM_META` / `UPSTREAM_DATA` / `UPSTREAM_LIBS` / `UPSTREAM_ASSETS` / `UPSTREAM_FABRIC` | 官方地址 | 上游，可替换 |
+| `MIRROR_METADATA_TTL` | `600` | 元数据 / Modrinth 响应缓存秒数 |
+| `MIRROR_MAX_CACHE_BYTES` | `0` | 缓存上限，0 = 不限 |
+| `UPSTREAM_META` / `_DATA` / `_LIBS` / `_ASSETS` / `_FABRIC` / `_FABRICMAVEN` / `_MODRINTH` / `_MODCDN` | 官方地址 | 上游，可替换 |
 | `UPSTREAM_PROXY` | 空 | 上游代理（如 `socks5h://127.0.0.1:1080`） |
+
+## 测试
+
+```bash
+uv run python -m unittest discover -s tests -v    # 14 项
+```
 
 ## 部署
 

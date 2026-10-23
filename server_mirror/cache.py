@@ -9,7 +9,7 @@ from pathlib import Path
 __all__ = ["Cache"]
 
 #: 元数据类路由使用 TTL；其余（哈希命名）视为不可变
-_METADATA_PREFIXES = ("meta", "fabric")
+_METADATA_PREFIXES = ("meta", "fabric", "modrinth")
 
 
 class Cache:
