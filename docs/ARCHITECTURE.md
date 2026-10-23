@@ -138,3 +138,25 @@ Forge / NeoForge 加载器需要经由「安装加载器…」或安装时选择
 - 已安装版本启动阶段零网络请求；
 - 镜像不可达时回落到本地实例与缓存清单；
 - 离线包：`versions/<id>` + 规则过滤后的 libraries + assets（可选 runtime）打包，导入端解压即可启动。
+
+## 安全边界（0.5.3）
+
+**镜像令牌**：`Downloader(token=...)` 必须同时给出 `token_origin`（默认取 `download_base`）。
+每个请求先算 `origin_of(url)`，只有与 `token_origin` 完全一致（scheme + host + port）才附加
+`X-OffCraft-Token`；未配置 `token_origin` 时一律不发（fail-closed），避免令牌随上游回落泄漏。
+
+**信任名单**：`offcraft/net/trust.py` 维护 Mojang / Forge / NeoForge / Fabric / Modrinth /
+GitHub 及其 CDN 主机；`check_url(url, allow_untrusted=False)` 返回中文原因或 `None`。
+整合包仅在上游回落处使用：未知主机 + 默认策略 → 跳过该文件并提示，
+`allow_untrusted_sources=true` → 提示后直连。主下载路径（镜像）不受影响。
+
+**离线包 / 整合包导入预算**：成员数、单文件、总解压体积、元数据 JSON 大小各有上限
+（`pack/offline.py` 与 `content/modpack.py`）。全量成员先做纯内存校验（路径、数量、体积、
+大小写不敏感的重名、目标冲突），全部通过后才写入，每个文件写 `<name>.importing` 再 `os.replace`，
+中途异常回滚已创建的文件。
+
+**镜像服务端容量**：`Cache(root, max_bytes, max_file_bytes)` 按 mtime 做 LRU 淘汰；
+写入走唯一临时名，`commit()` 用全局锁 + 重试保证并发下的 `os.replace` 安全；
+`SingleFlight` 让同一 URL 只回源一次，其余请求在 `flight_wait` 内等待；
+上游并发由 `BoundedSemaphore(max_upstreams)` 控制，超限直接 503；
+`/health` 返回 `cache` 统计（字节数、文件数、命中/淘汰计数）。

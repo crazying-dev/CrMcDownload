@@ -11,8 +11,9 @@
 | M6 | 部署到生产服务器并切换域名实测 | 已完成 |
 | M7 | 内容生态：Modrinth 搜索/安装、`fabricmaven`/`modrinth`/`modcdn` 路由、整合包安装 | 已完成 |
 | M8 | 加载器：安装时选原版/ Fabric/ NeoForge/ Forge，已有实例可补装；模组/光影只能装到带加载器的实例 | 已完成 |
-| M9 | PyInstaller 打包、CI、发布（`v0.5.0` Release） | 已完成 |
+| M9 | PyInstaller 打包、CI、发布（`v0.5.0` / `v0.5.3` Release） | 已完成 |
 | M11 | 下载源择优：镜像 vs 直连时延探测（`SourceRouter`） | 已完成 |
+| M12 | 安装版本页与内容安装目标（`Target`）、下拉框美化；Issue #1 安全与容量加固（`v0.5.3`） | 已完成 |
 | M10 | 插件市场（API 尚未接入，目前只有页面框架） | 待开始 |
 
 ## 验收基线
@@ -30,9 +31,8 @@
 
 | 仓库 | 命令 | 数量 |
 | --- | --- | --- |
-| `user` | `python -m unittest discover -s tests` | 99 |
-| `user-downloader` | 同上 | 73 |
-| `user-launcher` | 同上 | 55 |
-| `server-mirror` / `server` | 同上 | 17 |
+| `user` | `python -m unittest discover -s tests` | 144 |
+| `server-mirror` / `server` | 同上 | 33 |
+| `user-downloader` / `user-launcher` / `user-ui` | 同上 | 快照落后于 `user`，未随 0.5.3 同步 |
 
 另有离屏界面自检 `devtools/ui_smoke.py`（断言式）与截图 `devtools/ui_shots.py`。
