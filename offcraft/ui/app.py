@@ -24,7 +24,7 @@ from collections import deque
 from pathlib import Path
 from typing import Any, Callable
 
-from PyQt6.QtCore import QSize, Qt, QTimer
+from PyQt6.QtCore import QPoint, QSize, Qt, QTimer
 from PyQt6.QtGui import QIcon, QKeySequence, QPixmap, QShortcut
 from PyQt6.QtWidgets import (
     QApplication,
@@ -39,6 +39,8 @@ from PyQt6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QMenu,
     QMessageBox,
@@ -95,7 +97,7 @@ from offcraft.ui.theme import (
     human_size,
     initial_pixmap,
 )
-from offcraft.ui.widgets import Badge, Card, Tile
+from offcraft.ui.widgets import Badge, Card, ElidedLabel, Tile
 
 MANIFEST_URL = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json"
 
@@ -115,10 +117,27 @@ NAV_ITEMS = [
     ("plugins", "插件"),
 ]
 
+#: 草图单位长度：1k = 16px（窗口 75k × 50k → 1200 × 800）
+UNIT_PX = 16
+
+
+def u(k: float) -> int:
+    """把草图里的单位长度（k）换算成像素。"""
+    return int(round(k * UNIT_PX))
+
+
 #: 窗口长宽比 3:2（按草图单位长度换算）
 WINDOW_RATIO = (3, 2)
-WINDOW_DEFAULT = (1200, 800)
-WINDOW_MIN = (1080, 720)
+WINDOW_DEFAULT = (u(75), u(50))
+WINDOW_MIN = (u(67.5), u(45))
+
+#: 顶部菜单栏 5k
+TOPBAR_H = u(5)
+#: 内容区左右分栏：左 20k / 右 55k
+LEFT_W = u(20)
+RIGHT_W = u(55)
+#: 单侧内边距
+SIDE_PAD = u(1.5)
 
 #: 下载中心全部页签（游戏版本 + 内容 + Java）
 DOWNLOAD_TABS = [("game", "游戏版本")] + CONTENT_TABS + [("java", "Java")]
@@ -587,12 +606,9 @@ class MainWindow(QMainWindow):
         root = QVBoxLayout(central)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
-        root.addWidget(self._build_topbar())
+        self.topbar = self._build_topbar()
+        root.addWidget(self.topbar)
 
-        right = QWidget()
-        right_layout = QVBoxLayout(right)
-        right_layout.setContentsMargins(18, 14, 18, 8)
-        right_layout.setSpacing(10)
         self.stack = QStackedWidget()
         self.pages: dict[str, QWidget] = {
             "home": self._build_home_page(),
@@ -602,119 +618,234 @@ class MainWindow(QMainWindow):
         }
         for page in self.pages.values():
             self.stack.addWidget(page)
-        right_layout.addWidget(self.stack, 1)
-        right_layout.addWidget(self._build_task_panel())
-        right_layout.addWidget(self._build_status_bar())
-        root.addWidget(right, 1)
+        root.addWidget(self.stack, 1)
+
+        # 版本号（右下）、下载源（左下）、任务面板（浮层）都不占内容区高度
+        self._build_overlays()
         self.show_page("home")
+        self._place_overlays()
 
     def _build_topbar(self) -> QWidget:
-        """顶部导航栏：logo 在左，四项导航居中，账户在右。"""
+        """顶部菜单栏（5k）：logo 在左，四项导航居中，右侧显示当前状态。"""
         bar = QFrame()
         bar.setObjectName("topbar")
-        bar.setFixedHeight(68)
+        bar.setFixedHeight(TOPBAR_H)
         layout = QHBoxLayout(bar)
-        layout.setContentsMargins(20, 10, 20, 10)
-        layout.setSpacing(10)
+        layout.setContentsMargins(u(1.5), 0, u(1.5), 0)
+        layout.setSpacing(u(0.75))
 
+        side = u(14)
+
+        brand = QWidget()
+        brand.setFixedWidth(side)
+        brand_row = QHBoxLayout(brand)
+        brand_row.setContentsMargins(0, 0, 0, 0)
+        brand_row.setSpacing(u(0.5))
         logo = QLabel()
         logo.setFixedSize(36, 36)
         logo.setPixmap(block_pixmap("crmcdownload", 36))
-        layout.addWidget(logo)
+        brand_row.addWidget(logo)
+        name = QLabel(APP_NAME)
+        name.setObjectName("brand")
+        brand_row.addWidget(name)
+        brand_row.addStretch(1)
+        layout.addWidget(brand)
         layout.addStretch(1)
 
         self.nav_buttons: dict[str, QPushButton] = {}
         group = QButtonGroup(self)
         group.setExclusive(True)
         nav_row = QHBoxLayout()
-        nav_row.setSpacing(6)
+        nav_row.setSpacing(u(0.375))
         for key, text in NAV_ITEMS:
             button = QPushButton(text)
             button.setCheckable(True)
             button.setObjectName("topnav")
-            button.setMinimumHeight(36)
-            button.setMinimumWidth(94)
+            button.setMinimumHeight(40)
+            button.setMinimumWidth(u(6))
             button.setCursor(Qt.CursorShape.PointingHandCursor)
-            button.clicked.connect(lambda _c, name=key: self.show_page(name))
+            button.clicked.connect(lambda _c, page=key: self.show_page(page))
             group.addButton(button)
             nav_row.addWidget(button)
             self.nav_buttons[key] = button
         layout.addLayout(nav_row)
         layout.addStretch(1)
 
-        self.account_button = QPushButton(self.config.username)
-        self.account_button.setObjectName("segment")
-        self.account_button.setIcon(QIcon(initial_pixmap(self.config.username, 22, "account")))
-        self.account_button.setIconSize(QSize(22, 22))
-        self.account_button.setMinimumHeight(34)
-        self.account_button.setToolTip("切换离线账户")
-        self.account_button.clicked.connect(self._edit_account)
-        layout.addWidget(self.account_button)
+        status = QWidget()
+        status.setFixedWidth(side)
+        status_row = QHBoxLayout(status)
+        status_row.setContentsMargins(0, 0, 0, 0)
+        status_row.setSpacing(u(0.375))
+        status_row.addStretch(1)
+        self.status_dot = QLabel("●")
+        self.status_dot.setStyleSheet(f"color: {OK}; font-size: 11pt;")
+        status_row.addWidget(self.status_dot)
+        self.status_label = ElidedLabel("就绪")
+        self.status_label.setObjectName("status")
+        self.status_label.setFixedWidth(u(11))
+        status_row.addWidget(self.status_label)
+        layout.addWidget(status)
         return bar
 
     def _build_home_page(self) -> QWidget:
+        """启动页：左 20k（头像 / 名称 / 启动），右 55k（版本条 / 模组存档 / 配置）。"""
         page = QWidget()
         layout = QHBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(14)
+        layout.setSpacing(0)
 
-        hero = Card(margins=(22, 20, 22, 18))
-        hero.setFixedWidth(348)
+        left = QWidget()
+        left.setFixedWidth(LEFT_W)
+        column = QVBoxLayout(left)
+        column.setContentsMargins(SIDE_PAD, u(5), SIDE_PAD, u(2))
+        column.setSpacing(0)
 
-        account_row = QHBoxLayout()
-        account_row.setSpacing(10)
         self.avatar = QLabel()
-        self.avatar.setFixedSize(40, 40)
-        self.avatar.setPixmap(initial_pixmap(self.config.username, 40, "account"))
-        account_row.addWidget(self.avatar)
-        account_text = QVBoxLayout()
-        account_text.setSpacing(0)
-        self.account_name = QLabel(self.config.username)
-        self.account_name.setStyleSheet("font-weight: 700;")
-        account_text.addWidget(self.account_name)
-        account_text.addWidget(self._label("离线账户"))
-        account_row.addLayout(account_text, 1)
-        switch = QPushButton("切换")
-        switch.setObjectName("segment")
-        switch.clicked.connect(self._edit_account)
-        account_row.addWidget(switch)
-        hero.add_layout(account_row)
-        hero.add(self._hline())
+        self.avatar.setFixedSize(u(15), u(15))
+        self.avatar.setPixmap(initial_pixmap(self.config.username, u(15), "account"))
+        avatar_row = QHBoxLayout()
+        avatar_row.setContentsMargins(0, 0, 0, 0)
+        avatar_row.addStretch(1)
+        avatar_row.addWidget(self.avatar)
+        avatar_row.addStretch(1)
+        column.addLayout(avatar_row)
 
-        self.hero_icon = QLabel()
-        self.hero_icon.setFixedSize(84, 84)
-        self.hero_icon.setPixmap(block_pixmap("minecraft", 84))
-        icon_row = QHBoxLayout()
-        icon_row.addStretch(1)
-        icon_row.addWidget(self.hero_icon)
-        icon_row.addStretch(1)
-        hero.add_layout(icon_row)
+        column.addSpacing(u(3))
+        self.account_name = QLineEdit(self.config.username)
+        self.account_name.setObjectName("heroName")
+        self.account_name.setFixedHeight(u(4))
+        self.account_name.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.account_name.setMaxLength(16)
+        self.account_name.setToolTip("离线账户名：点击即可修改，回车生效")
+        self.account_name.editingFinished.connect(self._apply_account_name)
+        column.addWidget(self.account_name)
 
-        self.hero_name = QLabel("未选择版本")
-        self.hero_name.setObjectName("heroName")
-        self.hero_name.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        hero.add(self.hero_name)
+        column.addSpacing(u(3))
+        self.launch_button = QPushButton("启动游戏")
+        self.launch_button.setObjectName("accentBig")
+        self.launch_button.setFixedHeight(u(5))
+        self.launch_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.launch_button.clicked.connect(self._launch_or_stop)
+        column.addWidget(self.launch_button)
 
-        badges = QHBoxLayout()
-        badges.setSpacing(6)
-        badges.addStretch(1)
-        self.hero_loader = Badge("原版", "gray")
-        badges.addWidget(self.hero_loader)
-        self.hero_mc = Badge("MC -", "blue")
-        badges.addWidget(self.hero_mc)
-        badges.addStretch(1)
-        hero.add_layout(badges)
+        column.addSpacing(u(1))
+        self.home_hint = self._label("", "muted")
+        self.home_hint.setWordWrap(True)
+        self.home_hint.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        column.addWidget(self.home_hint)
+        column.addStretch(1)
+        layout.addWidget(left)
 
-        self.hero_meta = QLabel("从「下载中心」安装一个游戏版本开始")
-        self.hero_meta.setObjectName("muted")
-        self.hero_meta.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.hero_meta.setWordWrap(True)
-        hero.add(self.hero_meta)
-        hero.body.addStretch(1)
-        hero.add(self._hline())
+        right = QWidget()
+        right_column = QVBoxLayout(right)
+        right_column.setContentsMargins(0, 0, 0, 0)
+        right_column.setSpacing(0)
+        # 5k + 25k + 15k = 45k，随窗口高度等比缩放
+        right_column.addWidget(self._build_home_version_bar(), 5)
+        right_column.addWidget(self._build_home_middle(), 25)
+        right_column.addWidget(self._build_home_config(), 15)
+        layout.addWidget(right, 1)
+        return page
+
+    def _build_home_version_bar(self) -> QWidget:
+        """右侧顶部 5k：左边是当前版本（可下拉切换），右边是目录路径。"""
+        bar = QWidget()
+        row = QHBoxLayout(bar)
+        row.setContentsMargins(SIDE_PAD, u(0.75), SIDE_PAD, u(0.75))
+        row.setSpacing(u(0.75))
+
+        self.version_combo = QComboBox()
+        self.version_combo.setObjectName("heroVersion")
+        self.version_combo.setMinimumWidth(u(17))
+        self.version_combo.setFixedHeight(u(3.5))
+        self.version_combo.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.version_combo.setToolTip("当前版本：点击下拉切换")
+        self.version_combo.currentIndexChanged.connect(self._on_version_selected)
+        self.version_combo.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.version_combo.customContextMenuRequested.connect(
+            lambda pos: self._instance_menu(self.version_combo.mapToGlobal(pos))
+        )
+        row.addWidget(self.version_combo)
+
+        self.instance_menu_button = QPushButton("⋯")
+        self.instance_menu_button.setObjectName("segment")
+        self.instance_menu_button.setFixedSize(u(2.5), u(3.5))
+        self.instance_menu_button.setToolTip("版本设置 / 安装加载器 / 打开目录 / 删除实例")
+        self.instance_menu_button.clicked.connect(
+            lambda: self._instance_menu(
+                self.instance_menu_button.mapToGlobal(QPoint(u(0.5), u(3.5)))
+            )
+        )
+        row.addWidget(self.instance_menu_button)
+
+        self.path_label = ElidedLabel("")
+        self.path_label.setObjectName("mutedSmall")
+        self.path_label.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        self.path_label.setToolTip("当前版本的目录")
+        row.addWidget(self.path_label, 1)
+        return bar
+
+    def _build_home_middle(self) -> QWidget:
+        """右侧中部 25k：左 27k 是模组列表，右 18k 是存档列表。"""
+        holder = QWidget()
+        row = QHBoxLayout(holder)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(0)
+
+        mods = Card(margins=(u(1.25), u(0.75), u(1.25), u(1)))
+        head = QHBoxLayout()
+        head.setSpacing(u(0.5))
+        head.addWidget(self._label("模组", "h2"))
+        self.mods_count = self._label("", "mutedSmall")
+        head.addWidget(self.mods_count)
+        head.addStretch(1)
+        mods_open = QPushButton("打开目录")
+        mods_open.setObjectName("segment")
+        mods_open.setToolTip("打开当前版本的 mods 目录")
+        mods_open.clicked.connect(self._open_mods_dir)
+        head.addWidget(mods_open)
+        mods.add_layout(head)
+        self.mods_list = QListWidget()
+        self.mods_list.setObjectName("homeList")
+        self.mods_list.setFrameShape(QFrame.Shape.NoFrame)
+        mods.add(self.mods_list, 1)
+        row.addWidget(mods, 27)
+
+        saves = Card(margins=(u(1.25), u(0.75), u(1.25), u(1)))
+        head2 = QHBoxLayout()
+        head2.setSpacing(u(0.5))
+        head2.addWidget(self._label("存档", "h2"))
+        self.saves_count = self._label("", "mutedSmall")
+        head2.addWidget(self.saves_count)
+        head2.addStretch(1)
+        saves_open = QPushButton("打开目录")
+        saves_open.setObjectName("segment")
+        saves_open.setToolTip("打开当前版本的 saves 目录")
+        saves_open.clicked.connect(self._open_saves_dir)
+        head2.addWidget(saves_open)
+        saves.add_layout(head2)
+        self.saves_list = QListWidget()
+        self.saves_list.setObjectName("homeList")
+        self.saves_list.setFrameShape(QFrame.Shape.NoFrame)
+        saves.add(self.saves_list, 1)
+        row.addWidget(saves, 18)
+        return holder
+
+    def _build_home_config(self) -> QWidget:
+        """右侧底部 15k：内存与 Java（下拉框修改）。"""
+        card = Card(margins=(u(1.25), u(0.75), u(1.25), u(1.25)))
+        head = QHBoxLayout()
+        head.setSpacing(u(0.5))
+        head.addWidget(self._label("配置", "h2"))
+        head.addStretch(1)
+        self.config_hint = self._label("", "mutedSmall")
+        head.addWidget(self.config_hint)
+        card.add_layout(head)
 
         memory_row = QHBoxLayout()
-        memory_row.setSpacing(8)
+        memory_row.setSpacing(u(0.75))
         memory_row.addWidget(self._label("内存"))
         self.home_memory = QSlider(Qt.Orientation.Horizontal)
         self.home_memory.setRange(1024, 32768)
@@ -724,109 +855,145 @@ class MainWindow(QMainWindow):
         self.home_memory.valueChanged.connect(self._on_memory_changed)
         memory_row.addWidget(self.home_memory, 1)
         self.memory_value = QLabel(f"{self.config.memory_mb} MB")
-        self.memory_value.setMinimumWidth(76)
-        self.memory_value.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.memory_value.setMinimumWidth(u(5))
+        self.memory_value.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
         self.memory_value.setStyleSheet("font-weight: 700;")
         memory_row.addWidget(self.memory_value)
-        hero.add_layout(memory_row)
+        card.add_layout(memory_row)
 
-        self.launch_button = QPushButton("启动游戏")
-        self.launch_button.setObjectName("accentBig")
-        self.launch_button.setFixedHeight(56)
-        self.launch_button.clicked.connect(self._launch_or_stop)
-        hero.add(self.launch_button)
+        java_row = QHBoxLayout()
+        java_row.setSpacing(u(0.75))
+        java_row.addWidget(self._label("Java"))
+        self.home_java = QComboBox()
+        self.home_java.setToolTip("启动游戏使用的 Java（自动选择会按版本要求匹配）")
+        self.home_java.currentIndexChanged.connect(self._on_home_java_changed)
+        java_row.addWidget(self.home_java, 1)
+        detect = QPushButton("重新检测")
+        detect.clicked.connect(self._refresh_java_combo)
+        java_row.addWidget(detect)
+        card.add_layout(java_row)
+        card.body.addStretch(1)
+        return card
 
-        actions = QHBoxLayout()
-        actions.setSpacing(8)
-        instance_button = QPushButton("版本设置")
-        instance_button.clicked.connect(self._open_instance_dialog)
-        actions.addWidget(instance_button, 1)
-        open_button = QPushButton("打开目录")
-        open_button.clicked.connect(self._open_game_dir)
-        actions.addWidget(open_button, 1)
-        hero.add_layout(actions)
+    def _home_content_dir(self, name: str) -> Path:
+        instance = self.selected
+        base = self.game_dir_for(instance) if instance is not None else self.game_dir()
+        return base / name
 
-        layout.addWidget(hero)
+    def _open_mods_dir(self) -> None:
+        _reveal(self._home_content_dir("mods"))
 
-        right = Card(margins=(16, 14, 16, 14))
-        header = QHBoxLayout()
-        header.setSpacing(8)
-        header.addWidget(self._label("版本列表", "h2"))
-        header.addStretch(1)
-        self.instance_count = self._label("")
-        header.addWidget(self.instance_count)
-        refresh = QPushButton("刷新")
-        refresh.clicked.connect(self.refresh_instances)
-        header.addWidget(refresh)
-        right.add_layout(header)
+    def _open_saves_dir(self) -> None:
+        _reveal(self._home_content_dir("saves"))
 
-        self.version_tree = QTreeWidget()
-        self.version_tree.setHeaderLabels(["版本", "加载器", "大小", "最近使用"])
-        self.version_tree.setRootIsDecorated(False)
-        self.version_tree.setUniformRowHeights(True)
-        self.version_tree.setSelectionMode(QTreeWidget.SelectionMode.SingleSelection)
-        self.version_tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.version_tree.customContextMenuRequested.connect(self._version_menu)
-        self.version_tree.itemSelectionChanged.connect(self._on_version_selected)
-        self.version_tree.itemDoubleClicked.connect(self._on_version_activated)
-        head = self.version_tree.header()
-        head.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        for column in (1, 2, 3):
-            head.setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
-        right.add(self.version_tree, 1)
+    @staticmethod
+    def _add_empty_item(widget: QListWidget, text: str) -> None:
+        item = QListWidgetItem(text)
+        item.setFlags(Qt.ItemFlag.NoItemFlags)
+        widget.addItem(item)
 
-        tiles = QGridLayout()
-        tiles.setSpacing(10)
-        entries = [
-            ("下载游戏", "正式版 / 快照 / 远古版", lambda: self.goto_tab("game")),
-            ("模组", "从 Modrinth 安装", lambda: self.goto_content("mod")),
-            ("整合包", "一键安装完整实例", lambda: self.goto_content("modpack")),
-            ("资源包", "改变贴图与音效", lambda: self.goto_content("resourcepack")),
-            ("光影", "Iris / OptiFine 光影", lambda: self.goto_content("shader")),
-            ("数据目录", "打开启动器数据目录", self._open_data_dir),
-        ]
-        for index, (title, hint, callback) in enumerate(entries):
-            tiles.addWidget(Tile(title, hint, callback), index // 3, index % 3)
-        right.add_layout(tiles)
-        layout.addWidget(right, 1)
-        return page
+    @staticmethod
+    def _list_files(folder: Path, suffixes: tuple[str, ...]) -> list[tuple[Path, bool]]:
+        try:
+            entries = sorted(folder.iterdir(), key=lambda p: p.name.lower())
+        except OSError:
+            return []
+        found: list[tuple[Path, bool]] = []
+        for path in entries:
+            if not path.is_file():
+                continue
+            lowered = path.name.lower()
+            if lowered.endswith(suffixes):
+                found.append((path, lowered.endswith(".disabled")))
+        return found
+
+    @staticmethod
+    def _list_dirs(folder: Path) -> list[Path]:
+        try:
+            return sorted(
+                (path for path in folder.iterdir() if path.is_dir()),
+                key=lambda p: p.name.lower(),
+            )
+        except OSError:
+            return []
+
+    def _refresh_home_lists(self) -> None:
+        """重新读取当前版本的 mods / saves 目录。"""
+        if not hasattr(self, "mods_list"):
+            return
+        instance = self.selected
+        base = self.game_dir_for(instance) if instance is not None else self.game_dir()
+        mods = self._list_files(base / "mods", (".jar", ".zip", ".jar.disabled", ".zip.disabled"))
+        self.mods_list.clear()
+        for path, disabled in mods:
+            text = f"{path.name}（已禁用）" if disabled else path.name
+            item = QListWidgetItem(QIcon(block_pixmap(path.name, 20)), text)
+            item.setToolTip(str(path))
+            self.mods_list.addItem(item)
+        self.mods_count.setText(f"{len(mods)} 个" if mods else "")
+        if not mods:
+            self._add_empty_item(self.mods_list, "暂无模组")
+
+        saves = self._list_dirs(base / "saves")
+        self.saves_list.clear()
+        for folder in saves:
+            item = QListWidgetItem(QIcon(block_pixmap(folder.name, 20)), folder.name)
+            try:
+                item.setToolTip(f"{folder}\n{human_date(folder.stat().st_mtime)}")
+            except OSError:
+                item.setToolTip(str(folder))
+            self.saves_list.addItem(item)
+        self.saves_count.setText(f"{len(saves)} 个" if saves else "")
+        if not saves:
+            self._add_empty_item(self.saves_list, "暂无存档")
 
     def _build_download_page(self) -> QWidget:
+        """下载页：左侧 20k 分类导航，右侧 55k 内容。"""
         page = QWidget()
-        layout = QVBoxLayout(page)
+        layout = QHBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(12)
+        layout.setSpacing(0)
 
-        header = QHBoxLayout()
-        head = QVBoxLayout()
-        head.setSpacing(2)
-        head.addWidget(self._label("下载中心", "h2"))
+        left = QWidget()
+        left.setFixedWidth(LEFT_W)
+        column = QVBoxLayout(left)
+        column.setContentsMargins(SIDE_PAD, u(5), SIDE_PAD, u(2))
+        column.setSpacing(u(0.5))
+        column.addWidget(self._label("下载", "title"))
         self.download_sub = self._label("游戏版本、模组、整合包、资源包与光影，全部经由自建镜像加速")
-        head.addWidget(self.download_sub)
-        header.addLayout(head, 1)
-        self.source_badge = Badge("镜像", "green")
-        header.addWidget(self.source_badge)
-        layout.addLayout(header)
+        self.download_sub.setWordWrap(True)
+        column.addWidget(self.download_sub)
+        column.addSpacing(u(1.5))
 
-        tabs = QFrame()
-        tabs.setObjectName("softCard")
-        tabs_layout = QHBoxLayout(tabs)
-        tabs_layout.setContentsMargins(6, 6, 6, 6)
-        tabs_layout.setSpacing(4)
         self.tab_buttons: dict[str, QPushButton] = {}
         group = QButtonGroup(self)
         group.setExclusive(True)
         for key, text in DOWNLOAD_TABS:
             button = QPushButton(text)
             button.setCheckable(True)
-            button.setObjectName("segment")
-            button.setMinimumHeight(30)
+            button.setObjectName("nav")
+            button.setMinimumHeight(u(2.75))
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
             button.clicked.connect(lambda _c, name=key: self.switch_tab(name))
             group.addButton(button)
-            tabs_layout.addWidget(button)
+            column.addWidget(button)
             self.tab_buttons[key] = button
-        tabs_layout.addStretch(1)
-        layout.addWidget(tabs)
+        column.addStretch(1)
+
+        badge_row = QHBoxLayout()
+        badge_row.setContentsMargins(0, 0, 0, 0)
+        self.source_badge = Badge("镜像", "green")
+        badge_row.addWidget(self.source_badge)
+        badge_row.addStretch(1)
+        column.addLayout(badge_row)
+        layout.addWidget(left)
+
+        right = QWidget()
+        right_column = QVBoxLayout(right)
+        right_column.setContentsMargins(0, u(1), SIDE_PAD, u(2.5))
+        right_column.setSpacing(0)
 
         self.dl_stack = QStackedWidget()
         self.dl_stack.addWidget(self._build_game_tab())
@@ -836,7 +1003,8 @@ class MainWindow(QMainWindow):
             self.content_pages[key] = content
             self.dl_stack.addWidget(content)
         self.dl_stack.addWidget(self._build_java_tab())
-        layout.addWidget(self.dl_stack, 1)
+        right_column.addWidget(self.dl_stack, 1)
+        layout.addWidget(right, 1)
 
         self.tab_buttons["game"].setChecked(True)
         return page
@@ -925,41 +1093,50 @@ class MainWindow(QMainWindow):
         return page
 
     def _build_plugins_page(self) -> QWidget:
+        """插件页：左 20k 分区导航，右 55k 空状态框架。"""
         page = QWidget()
-        layout = QVBoxLayout(page)
+        layout = QHBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(12)
+        layout.setSpacing(0)
 
-        header = QHBoxLayout()
-        head = QVBoxLayout()
-        head.setSpacing(2)
-        head.addWidget(self._label("插件", "h2"))
-        head.addWidget(self._label("启动器插件：市场 / 官方 / 社区 / 其他 / 已下载（接口未接入，先做框架）"))
-        header.addLayout(head, 1)
-        self.plugin_badge = Badge("框架", "gray")
-        header.addWidget(self.plugin_badge)
-        layout.addLayout(header)
+        left = QWidget()
+        left.setFixedWidth(LEFT_W)
+        column = QVBoxLayout(left)
+        column.setContentsMargins(SIDE_PAD, u(5), SIDE_PAD, u(2))
+        column.setSpacing(u(0.5))
+        column.addWidget(self._label("插件", "title"))
+        intro = self._label("启动器插件：市场 / 官方 / 社区 / 其他 / 已下载（接口未接入，先做框架）")
+        intro.setWordWrap(True)
+        column.addWidget(intro)
+        column.addSpacing(u(1.5))
 
-        tabs = QFrame()
-        tabs.setObjectName("softCard")
-        tabs_layout = QHBoxLayout(tabs)
-        tabs_layout.setContentsMargins(6, 6, 6, 6)
-        tabs_layout.setSpacing(4)
         self.plugin_buttons: dict[str, QPushButton] = {}
         group = QButtonGroup(self)
         group.setExclusive(True)
         for key, text in PLUGIN_TABS:
             button = QPushButton(text)
             button.setCheckable(True)
-            button.setObjectName("segment")
-            button.setMinimumHeight(30)
+            button.setObjectName("nav")
+            button.setMinimumHeight(u(2.75))
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
             button.clicked.connect(lambda _c, name=key: self._switch_plugin(name))
             group.addButton(button)
-            tabs_layout.addWidget(button)
+            column.addWidget(button)
             self.plugin_buttons[key] = button
-        tabs_layout.addStretch(1)
+        column.addStretch(1)
+        self.plugin_badge = Badge("框架", "gray")
+        badge_row = QHBoxLayout()
+        badge_row.setContentsMargins(0, 0, 0, 0)
+        badge_row.addWidget(self.plugin_badge)
+        badge_row.addStretch(1)
+        column.addLayout(badge_row)
         self.plugin_buttons["market"].setChecked(True)
-        layout.addWidget(tabs)
+        layout.addWidget(left)
+
+        right = QWidget()
+        right_column = QVBoxLayout(right)
+        right_column.setContentsMargins(0, u(1), SIDE_PAD, u(2.5))
+        right_column.setSpacing(0)
 
         empty = Card(margins=(28, 28, 28, 22))
         icon_row = QHBoxLayout()
@@ -990,7 +1167,8 @@ class MainWindow(QMainWindow):
         for index, (title, hint) in enumerate(entries):
             tiles.addWidget(Tile(title, hint, lambda _c=False, t=title: self._plugin_stub(t)), 0, index)
         empty.add_layout(tiles)
-        layout.addWidget(empty, 1)
+        right_column.addWidget(empty, 1)
+        layout.addWidget(right, 1)
         self._switch_plugin("market")
         return page
 
@@ -1173,10 +1351,43 @@ class MainWindow(QMainWindow):
         _reveal(self.game_dir() / "runtime")
 
     def _build_settings_page(self) -> QWidget:
+        """设置页：左 20k 标题与操作，右 55k 设置卡片。"""
         page = QWidget()
-        outer = QVBoxLayout(page)
+        outer = QHBoxLayout(page)
         outer.setContentsMargins(0, 0, 0, 0)
-        outer.setSpacing(10)
+        outer.setSpacing(0)
+
+        left = QWidget()
+        left.setFixedWidth(LEFT_W)
+        side = QVBoxLayout(left)
+        side.setContentsMargins(SIDE_PAD, u(5), SIDE_PAD, u(2))
+        side.setSpacing(u(0.75))
+        side.addWidget(self._label("设置", "title"))
+        intro = self._label(
+            "游戏目录、版本隔离、Java 与内存在这里调整；下载源由发布者固定，只有按 F12 才能修改。"
+        )
+        intro.setWordWrap(True)
+        side.addWidget(intro)
+        side.addSpacing(u(1.5))
+        save_button = QPushButton("保存设置")
+        save_button.setObjectName("accent")
+        save_button.setFixedHeight(u(2.75))
+        save_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        save_button.clicked.connect(self.save_settings)
+        side.addWidget(save_button)
+        data_button = QPushButton("打开数据目录")
+        data_button.clicked.connect(self._open_data_dir)
+        side.addWidget(data_button)
+        source_button = QPushButton("下载源设置（F12）")
+        source_button.clicked.connect(self.open_source_dialog)
+        side.addWidget(source_button)
+        side.addStretch(1)
+        outer.addWidget(left)
+
+        right = QWidget()
+        right_column = QVBoxLayout(right)
+        right_column.setContentsMargins(0, u(1), SIDE_PAD, u(2))
+        right_column.setSpacing(0)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -1246,7 +1457,9 @@ class MainWindow(QMainWindow):
 
         source = Card()
         source.add(self._label("下载源", "h2"))
-        source.add(self._label("客户端只与下载源通信，游戏文件 / Fabric / Forge / Modrinth 都经它代理"))
+        source_hint = self._label("客户端只与下载源通信，游戏文件 / Fabric / Forge / Modrinth 都经它代理")
+        source_hint.setWordWrap(True)
+        source.add(source_hint)
         self.settings_base = QLineEdit(self.config.download_base)
         self.settings_base.setReadOnly(True)
         self.settings_base.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -1289,8 +1502,14 @@ class MainWindow(QMainWindow):
 
         about = Card()
         about.add(self._label("关于", "h2"))
-        about.add(self._label(f"{APP_NAME} v{__version__} · 自建镜像启动器，仅依赖 Python 标准库 + PyQt6"))
-        about.add(self._label(f"数据目录：{config_dir(self.data_dir)}"))
+        about_text = self._label(
+            f"{APP_NAME} v{__version__} · 自建镜像启动器，仅依赖 Python 标准库 + PyQt6"
+        )
+        about_text.setWordWrap(True)
+        about.add(about_text)
+        data_text = self._label(f"数据目录：{config_dir(self.data_dir)}")
+        data_text.setWordWrap(True)
+        about.add(data_text)
         about_row = QHBoxLayout()
         about_row.setSpacing(8)
         open_data = QPushButton("打开数据目录")
@@ -1305,60 +1524,86 @@ class MainWindow(QMainWindow):
 
         layout.addStretch(1)
         scroll.setWidget(holder)
-        outer.addWidget(scroll, 1)
-
-        actions = QHBoxLayout()
-        actions.addStretch(1)
-        save = QPushButton("保存设置")
-        save.setObjectName("accent")
-        save.clicked.connect(self.save_settings)
-        actions.addWidget(save)
-        outer.addLayout(actions)
+        right_column.addWidget(scroll, 1)
+        outer.addWidget(right, 1)
         return page
 
-    def _build_task_panel(self) -> QWidget:
-        self.task_panel = Card(margins=(14, 10, 14, 10))
+    def _build_overlays(self) -> None:
+        """版本号（右下）、下载源（左下）与任务面板（浮层），都不占内容区高度。"""
+        central = self.centralWidget()
+        if central is None:
+            return
+        self.source_label = QLabel("下载源：-", central)
+        self.source_label.setObjectName("mutedSmall")
+        self.source_label.setToolTip("下载源已由发布者固定，按 F12 可打开修改窗口")
+        self.source_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+
+        self.version_label = QLabel(f"v{__version__}", central)
+        self.version_label.setObjectName("versionTag")
+        self.version_label.setToolTip(f"{APP_NAME} v{__version__}")
+        self.version_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+
+        self.task_panel = self._build_task_panel(central)
+        self.task_panel.setVisible(False)
+
+    def _place_overlays(self) -> None:
+        central = self.centralWidget()
+        if central is None:
+            return
+        width, height = central.width(), central.height()
+        bottom = max(0, height - u(0.4))
+        if hasattr(self, "version_label"):
+            self.version_label.adjustSize()
+            self.version_label.move(
+                max(0, width - self.version_label.width() - u(1.25)),
+                max(0, bottom - self.version_label.height()),
+            )
+            self.version_label.raise_()
+        if hasattr(self, "source_label"):
+            self.source_label.adjustSize()
+            self.source_label.move(u(1.25), max(0, bottom - self.source_label.height()))
+            self.source_label.raise_()
+        if hasattr(self, "task_panel") and self.task_panel.isVisible():
+            hint = self.task_panel.sizeHint()
+            panel_w = min(max(hint.width(), u(30)), max(u(20), width - u(4)))
+            panel_h = max(hint.height(), u(5))
+            stack_bottom = bottom - self.version_label.height() - u(0.75)
+            self.task_panel.setGeometry(
+                max(0, width - panel_w - u(1.25)),
+                max(0, stack_bottom - panel_h),
+                panel_w,
+                panel_h,
+            )
+            self.task_panel.raise_()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt 命名
+        super().resizeEvent(event)
+        self._place_overlays()
+
+    def _build_task_panel(self, parent: QWidget | None = None) -> Card:
+        panel = Card(parent, margins=(u(1.25), u(0.75), u(1.25), u(0.75)))
         row = QHBoxLayout()
-        row.setSpacing(10)
+        row.setSpacing(u(0.5))
         self.task_title = QLabel("")
         self.task_title.setObjectName("h3")
         row.addWidget(self.task_title)
         self.task_phase = self._label("")
         row.addWidget(self.task_phase, 1)
-        self.task_detail = self._label("")
-        row.addWidget(self.task_detail)
         self.task_percent = QLabel("0%")
         self.task_percent.setStyleSheet("font-weight: 700;")
         row.addWidget(self.task_percent)
         self.task_cancel = QPushButton("取消")
         self.task_cancel.clicked.connect(self.cancel_task)
         row.addWidget(self.task_cancel)
-        self.task_panel.add_layout(row)
+        panel.add_layout(row)
         self.task_bar = QProgressBar()
         self.task_bar.setRange(0, 100)
         self.task_bar.setValue(0)
-        self.task_panel.add(self.task_bar)
-        self.task_panel.setVisible(False)
-        return self.task_panel
-
-    def _build_status_bar(self) -> QWidget:
-        bar = QWidget()
-        layout = QHBoxLayout(bar)
-        layout.setContentsMargins(6, 0, 4, 0)
-        layout.setSpacing(8)
-        self.status_dot = QLabel("●")
-        self.status_dot.setStyleSheet(f"color: {OK}; font-size: 11pt;")
-        layout.addWidget(self.status_dot)
-        self.status_label = QLabel("就绪")
-        self.status_label.setObjectName("status")
-        layout.addWidget(self.status_label, 1)
-        self.stats_label = self._label("")
-        layout.addWidget(self.stats_label)
-        self.source_label = self._label("")
-        self.source_label.setObjectName("mutedSmall")
-        self.source_label.setToolTip("下载源已由发布者固定，按 F12 可打开修改窗口")
-        layout.addWidget(self.source_label)
-        return bar
+        panel.add(self.task_bar)
+        self.task_detail = self._label("")
+        panel.add(self.task_detail)
+        panel.setVisible(False)
+        return panel
 
     # ------------------------------------------------------------- 导航
     def show_page(self, name: str) -> None:
@@ -1447,71 +1692,70 @@ class MainWindow(QMainWindow):
     def _apply_instances(self, instances: list[Instance]) -> None:
         previous = self.selected.id if self.selected is not None else (self.config.last_version or "")
         self.instances = list(instances)
-        self.version_tree.blockSignals(True)
-        self.version_tree.clear()
+        self.version_combo.blockSignals(True)
+        self.version_combo.clear()
         for item in self.instances:
-            node = QTreeWidgetItem(
-                [item.id, item.loader, human_size(item.size_bytes), human_date(item.mtime)]
+            loader = item.loader or "原版"
+            label = item.id if loader in ("原版", "未知") else f"{item.id} · {loader}"
+            self.version_combo.addItem(QIcon(block_pixmap(item.id, 22, item.loader)), label, item)
+            index = self.version_combo.count() - 1
+            self.version_combo.setItemData(
+                index, item.broken or f"{item.id} · {loader}", Qt.ItemDataRole.ToolTipRole
             )
-            node.setData(0, Qt.ItemDataRole.UserRole, item)
-            node.setIcon(0, QIcon(block_pixmap(item.id, 26, item.loader)))
-            if item.broken:
-                node.setToolTip(0, item.broken)
-            self.version_tree.addTopLevelItem(node)
-        self.version_tree.blockSignals(False)
 
-        target = None
-        for index in range(self.version_tree.topLevelItemCount()):
-            node = self.version_tree.topLevelItem(index)
-            if node is not None and node.text(0) == previous:
-                target = node
+        target = -1
+        for index, item in enumerate(self.instances):
+            if item.id == previous:
+                target = index
                 break
-        if target is None and self.version_tree.topLevelItemCount():
-            target = self.version_tree.topLevelItem(0)
-        if target is not None:
-            self.version_tree.setCurrentItem(target)
-        self.selected = target.data(0, Qt.ItemDataRole.UserRole) if target is not None else None
+        if target < 0 and self.instances:
+            target = 0
+        if target >= 0:
+            self.version_combo.setCurrentIndex(target)
+        self.version_combo.blockSignals(False)
+
+        self.selected = self.version_combo.currentData() if target >= 0 else None
         self._update_hero()
 
         total = sum(item.size_bytes for item in self.instances)
-        self.instance_count.setText(f"{len(self.instances)} 个实例")
-        self.stats_label.setText(f"{len(self.instances)} 个实例 · {human_size(total)}")
+        if self.instances:
+            self.status(f"{len(self.instances)} 个实例 · {human_size(total)}")
         self._render_versions()
 
-    def _on_version_selected(self) -> None:
-        node = self.version_tree.currentItem()
-        self.selected = node.data(0, Qt.ItemDataRole.UserRole) if node is not None else None
+    def _on_version_selected(self, index: int) -> None:
+        instance = self.version_combo.itemData(index) if index >= 0 else None
+        self.selected = instance
+        if instance is not None:
+            self.config.last_version = instance.id
         self._update_hero()
 
-    def _on_version_activated(self, item: QTreeWidgetItem, _column: int) -> None:
-        instance = item.data(0, Qt.ItemDataRole.UserRole)
-        if instance is not None:
-            self.launch_game(instance)
-
     def _update_hero(self) -> None:
+        """把当前实例的信息写到启动页（提示、目录、模组 / 存档列表）。"""
         instance = self.selected
         if instance is None:
-            self.hero_name.setText("未选择版本")
-            self.hero_icon.setPixmap(block_pixmap("minecraft", 84))
-            self.hero_loader.set("原版", "gray")
-            self.hero_mc.set("MC -", "gray")
-            self.hero_meta.setText("从「下载中心」安装一个游戏版本开始")
+            self.home_hint.setText("还没有可用的游戏版本，去「下载」页安装一个吧")
+            self.path_label.setText(str(self.game_dir()))
+            self.config_hint.setText("")
             self.launch_button.setEnabled(False)
+            self._refresh_home_lists()
             return
-        self.hero_name.setText(instance.id)
-        self.hero_icon.setPixmap(block_pixmap(instance.id, 84, instance.loader))
-        self.hero_loader.set(instance.loader, LOADER_TONES.get(instance.loader, "gray"))
-        self.hero_mc.set(f"MC {instance.mc_version}", "blue")
-        parts = [human_size(instance.size_bytes), f"最近使用 {human_date(instance.mtime)}"]
+        parts = [
+            f"MC {instance.mc_version}",
+            instance.loader or "原版",
+            human_size(instance.size_bytes),
+        ]
         pack = read_pack_metadata(self.game_dir(), instance.id)
         if pack and pack.get("name"):
             parts.insert(0, f"整合包 {pack.get('name')}")
         if not supports_mods(instance.loader):
-            parts.append("原版 · 不能装模组（右键可安装加载器）")
+            parts.append("原版 · 不能装模组（点 ⋯ 可安装加载器）")
         if instance.broken:
             parts.append("版本 JSON 损坏")
-        self.hero_meta.setText("  ·  ".join(parts))
+        self.home_hint.setText("  ·  ".join(parts))
+        self.path_label.setText(str(self.game_dir_for(instance)))
+        self.config_hint.setText(f"最近使用 {human_date(instance.mtime)}")
         self.launch_button.setEnabled(True)
+        self._refresh_home_lists()
 
     def _on_memory_changed(self, value: int) -> None:
         self.config.memory_mb = int(value)
@@ -1522,37 +1766,35 @@ class MainWindow(QMainWindow):
             self.settings_memory.blockSignals(False)
             self.settings_memory_value.setText(f"{value} MB")
 
-    def _version_menu(self, pos) -> None:
-        node = self.version_tree.itemAt(pos)
-        if node is None:
-            return
-        self.version_tree.setCurrentItem(node)
-        instance = node.data(0, Qt.ItemDataRole.UserRole)
-        if instance is None:
-            return
+    def _instance_menu(self, global_pos) -> None:
+        """版本下拉框右侧的「⋯」菜单：版本设置 / 加载器 / 目录 / 删除。"""
+        instance = self.selected
         menu = QMenu(self)
-        launch = menu.addAction("启动游戏")
-        menu.addSeparator()
         settings = menu.addAction("版本设置")
         add_loader = menu.addAction("安装加载器…")
         menu.addSeparator()
         open_game = menu.addAction("打开游戏目录")
         open_version = menu.addAction("打开版本目录")
         menu.addSeparator()
+        refresh = menu.addAction("刷新版本列表")
         remove = menu.addAction("删除实例")
-        chosen = menu.exec(self.version_tree.viewport().mapToGlobal(pos))
-        if chosen is launch:
-            self.launch_game(instance)
+        for action in (settings, add_loader, open_game, open_version, remove):
+            action.setEnabled(instance is not None)
+        chosen = menu.exec(global_pos)
+        if chosen is None:
+            return
+        if chosen is refresh:
+            self.refresh_instances()
+        elif chosen is remove and instance is not None:
+            self._delete_instance(instance)
         elif chosen is settings:
             self._open_instance_dialog()
-        elif chosen is add_loader:
+        elif chosen is add_loader and instance is not None:
             self._install_loader_on(instance)
         elif chosen is open_game:
             _reveal(self.game_dir_for(instance))
-        elif chosen is open_version:
+        elif chosen is open_version and instance is not None:
             _reveal(self.game_dir() / "versions" / instance.id)
-        elif chosen is remove:
-            self._delete_instance(instance)
 
     def _delete_instance(self, instance: Instance) -> None:
         answer = QMessageBox.question(
@@ -1564,23 +1806,27 @@ class MainWindow(QMainWindow):
         self.notice(f"已删除实例 {instance.id}", "WARN")
         self.refresh_instances()
 
-    def _edit_account(self) -> None:
-        dialog = AccountDialog(self, self.config.username)
-        if not dialog.exec():
+    def _apply_account_name(self) -> None:
+        """名称框回车：校验后保存并刷新头像。"""
+        name = self.account_name.text().strip()
+        if name == self.config.username:
+            self.account_name.setText(self.config.username)
             return
-        name = dialog.value()
         try:
             validate_name(name)
         except ValueError as exc:
             QMessageBox.warning(self, APP_NAME, str(exc))
+            self.account_name.setText(self.config.username)
             return
         self.config.username = name
         save_config(self.config, self.data_dir)
-        self.account_name.setText(name)
-        self.avatar.setPixmap(initial_pixmap(name, 40, "account"))
-        self.account_button.setText(name)
-        self.account_button.setIcon(QIcon(initial_pixmap(name, 26, "account")))
+        self.avatar.setPixmap(initial_pixmap(name, u(15), "account"))
         self.notice(f"已切换离线账户：{name}")
+
+    def _edit_account(self) -> None:
+        """兼容旧入口：直接聚焦名称框改名。"""
+        self.account_name.setFocus()
+        self.account_name.selectAll()
 
     # ------------------------------------------------------------- 启动
     def _launch_or_stop(self) -> None:
@@ -2040,6 +2286,7 @@ class MainWindow(QMainWindow):
         cancel = threading.Event()
         self.cancel_event = cancel
         self.task_panel.setVisible(True)
+        self._place_overlays()
         self.task_title.setText(title)
         self.task_phase.setText("准备中……")
         self.task_detail.setText("")
@@ -2245,31 +2492,51 @@ class MainWindow(QMainWindow):
             self.settings_game_dir.setText(folder)
 
     def _refresh_java_combo(self) -> None:
-        if not hasattr(self, "settings_java"):
+        if not hasattr(self, "settings_java") and not hasattr(self, "home_java"):
             return
         candidates = list_java(self.game_dir())
-        self.settings_java.blockSignals(True)
-        self.settings_java.clear()
-        self.settings_java.addItem("自动选择（按版本要求）", "")
-        for candidate in candidates:
-            self.settings_java.addItem(
-                f"Java {candidate.major} · {candidate.source}", str(candidate.path)
-            )
         override = self.config.java_overrides.get("__global__", "")
-        index = self.settings_java.findData(override)
-        self.settings_java.setCurrentIndex(index if index >= 0 else 0)
-        self.settings_java.blockSignals(False)
+        for combo in (getattr(self, "home_java", None), getattr(self, "settings_java", None)):
+            if combo is None:
+                continue
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItem("自动选择（按版本要求）", "")
+            for candidate in candidates:
+                combo.addItem(
+                    f"Java {candidate.major} · {candidate.source}", str(candidate.path)
+                )
+            index = combo.findData(override)
+            combo.setCurrentIndex(index if index >= 0 else 0)
+            combo.blockSignals(False)
         if not candidates and hasattr(self, "settings_source_state"):
             self.settings_source_state.setText("未检测到 Java，可点「添加 Java」手动指定")
 
     def _on_java_changed(self, index: int) -> None:
         if index < 0:
             return
-        path = self.settings_java.itemData(index)
+        self._set_java_override(self.settings_java.itemData(index) or "")
+
+    def _on_home_java_changed(self, index: int) -> None:
+        if index < 0:
+            return
+        self._set_java_override(self.home_java.itemData(index) or "")
+
+    def _set_java_override(self, path: str) -> None:
+        """两个 Java 下拉框（启动页 / 设置页）共用一份全局选择。"""
         if path:
             self.config.java_overrides["__global__"] = str(path)
         else:
             self.config.java_overrides.pop("__global__", None)
+        save_config(self.config, self.data_dir)
+        for combo in (getattr(self, "home_java", None), getattr(self, "settings_java", None)):
+            if combo is None:
+                continue
+            index = combo.findData(path)
+            if index >= 0 and combo.currentIndex() != index:
+                combo.blockSignals(True)
+                combo.setCurrentIndex(index)
+                combo.blockSignals(False)
 
     def _choose_java(self) -> None:
         path, _filter = QFileDialog.getOpenFileName(
