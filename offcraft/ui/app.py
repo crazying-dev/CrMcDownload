@@ -609,48 +609,38 @@ class MainWindow(QMainWindow):
         self.show_page("home")
 
     def _build_topbar(self) -> QWidget:
-        """顶部导航栏：品牌 | 启动 / 下载 / 设置 / 插件 | 下载源 · 账户。"""
+        """顶部导航栏：logo 在左，四项导航居中，账户在右。"""
         bar = QFrame()
         bar.setObjectName("topbar")
         bar.setFixedHeight(68)
         layout = QHBoxLayout(bar)
         layout.setContentsMargins(20, 10, 20, 10)
-        layout.setSpacing(16)
+        layout.setSpacing(10)
 
         logo = QLabel()
         logo.setFixedSize(36, 36)
         logo.setPixmap(block_pixmap("crmcdownload", 36))
         layout.addWidget(logo)
-
-        names = QVBoxLayout()
-        names.setSpacing(0)
-        title = QLabel(APP_NAME)
-        title.setObjectName("brand")
-        names.addWidget(title)
-        names.addWidget(self._label(f"v{__version__} · 自建镜像", "brandSub"))
-        layout.addLayout(names)
-        layout.addSpacing(24)
+        layout.addStretch(1)
 
         self.nav_buttons: dict[str, QPushButton] = {}
         group = QButtonGroup(self)
         group.setExclusive(True)
+        nav_row = QHBoxLayout()
+        nav_row.setSpacing(6)
         for key, text in NAV_ITEMS:
             button = QPushButton(text)
             button.setCheckable(True)
             button.setObjectName("topnav")
             button.setMinimumHeight(36)
+            button.setMinimumWidth(94)
             button.setCursor(Qt.CursorShape.PointingHandCursor)
             button.clicked.connect(lambda _c, name=key: self.show_page(name))
             group.addButton(button)
-            layout.addWidget(button)
+            nav_row.addWidget(button)
             self.nav_buttons[key] = button
-
+        layout.addLayout(nav_row)
         layout.addStretch(1)
-
-        self.source_label = self._label("")
-        self.source_label.setObjectName("mutedSmall")
-        self.source_label.setToolTip("下载源已由发布者固定，按 F12 可打开修改窗口")
-        layout.addWidget(self.source_label)
 
         self.account_button = QPushButton(self.config.username)
         self.account_button.setObjectName("segment")
@@ -1364,6 +1354,10 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.status_label, 1)
         self.stats_label = self._label("")
         layout.addWidget(self.stats_label)
+        self.source_label = self._label("")
+        self.source_label.setObjectName("mutedSmall")
+        self.source_label.setToolTip("下载源已由发布者固定，按 F12 可打开修改窗口")
+        layout.addWidget(self.source_label)
         return bar
 
     # ------------------------------------------------------------- 导航
