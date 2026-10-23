@@ -12,6 +12,9 @@ client jar──/data/v1/...─────▶                 ├──▶ pist
 资源对象  ──/assets/xx/...───▶                 ├──▶ resources.download.minecraft.net
 Fabric    ──/fabric/...──────▶                 ├──▶ meta.fabricmc.net
 Fabric jar──/fabricmaven/...─▶                 ├──▶ maven.fabricmc.net
+Forge jar ──/forgemaven/...──▶                 ├──▶ maven.minecraftforge.net
+NeoForge  ──/neoforgemaven/...▶                ├──▶ maven.neoforged.net
+Java 运行时─/meta/v1/products/...▶              ├──▶ launchermeta（java-runtime all.json）
 搜索 / 版本──/modrinth/...?...▶                ├──▶ api.modrinth.com（保留查询串）
 内容文件  ──/modcdn/...──────▶                 └──▶ cdn.modrinth.com
 ```
@@ -28,8 +31,12 @@ Fabric jar──/fabricmaven/...─▶                 ├──▶ maven.fabric
 | `resources.download.minecraft.net` | `{base}/assets/<path>` |
 | `meta.fabricmc.net` | `{base}/fabric/<path>` |
 | `maven.fabricmc.net` | `{base}/fabricmaven/<path>` |
+| `maven.minecraftforge.net` | `{base}/forgemaven/<path>` |
+| `maven.neoforged.net` | `{base}/neoforgemaven/<path>` |
 | `api.modrinth.com` | `{base}/modrinth/<path>?<query>` |
 | `cdn.modrinth.com` | `{base}/modcdn/<path>` |
+
+maven 路由下 `*.xml`（`maven-metadata.xml`）按元数据缓存（TTL 600s），其余 jar 视为不可变。
 
 未识别主机直接报错，绝不回落到直连。唯一的例外是**内容层**（模组 / 整合包 / 资源包 / 光影）：
 当镜像缺少新路由或返回非 2xx 时会主动回落到 Modrinth 官方 API，以免自建镜像未升级时功能不可用。
@@ -56,6 +63,22 @@ Fabric jar──/fabricmaven/...─▶                 ├──▶ maven.fabric
 
 必需依赖按广度优先安装，单次安装上限 24 个文件，防止异常依赖图无限扩张。
 
+## 加载器与 Java 运行时
+
+```
+安装版本 → 选择加载器对话框（原版 / Fabric / Forge / NeoForge）
+  ├─ 原版      ：只装 Mojang 文件，不能装模组（资源包不受影响）
+  ├─ Fabric    ：拉 loader profile JSON → versions/<fabric-...>/<id>.json → 补库
+  └─ Forge/NeoForge：下载 installer jar → java -jar <installer> --installClient <mc_dir> → 识别新版本目录
+
+Java：读取 Mojang java-runtime all.json → 按平台列出 jre-legacy / java-runtime-*
+     → 展开清单 files（拒绝 ../ 越界）→ runtime/<component>/bin/java.exe
+```
+
+Forge / NeoForge 安装器会直接从自己的 maven 拉依赖（不受镜像控制），且必须先有可用的 Java。
+游戏内“能不能装模组”由实例的加载器决定：`原版` 实例只能装资源包，模组 / 光影必须选带加载器的实例
+（已有实例可在版本右键菜单「安装加载器…」补装）。
+
 ## 整合包管线
 
 ```
@@ -65,7 +88,7 @@ Fabric jar──/fabricmaven/...─▶                 ├──▶ maven.fabric
 → 解压 overrides/ → 写 offcraft-pack.json
 ```
 
-Forge / NeoForge / Quilt 目前只写占位版本 JSON 并给出警告，不自动安装加载器。
+Forge / NeoForge 加载器需要经由「安装加载器…」或安装时选择，整合包自身不会触发安装器。
 
 ## 启动管线
 

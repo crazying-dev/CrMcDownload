@@ -36,12 +36,15 @@
 左侧固定侧边栏 + 右侧内容区：
 
 - **启动游戏**：账号行、版本大图卡、内存滑块、启动主按钮；右侧版本列表（右键：启动 / 版本设置 /
-  打开游戏目录 / 删除实例）与 6 个快捷磁贴
+  **安装加载器…** / 打开游戏目录 / 删除实例）与 6 个快捷磁贴
 - **下载中心**：游戏版本（正式版 / 快照 / 远古版 / 已安装，支持搜索与安装最新版）、
-  模组 / 整合包 / 资源包 / 光影（Modrinth 搜索 → 详情 → 版本 → 一键安装）
-- **设置**：游戏目录、版本隔离、Java（自动检测 / 手动添加）、内存、JVM 参数、下载源（地址 / 令牌 / 代理 / 并发）
+  模组 / 整合包 / 资源包 / 光影（Modrinth 搜索 → 详情 → 版本 → 一键安装）、Java（Mojang 官方 java-runtime）
+- **插件**：市场 / 官方 / 社区 / 其他 / 已下载（框架，插件 API 未接入）
+- **设置**：游戏目录、版本隔离、Java（自动检测 / 手动添加）、内存、JVM 参数、
+  下载源（只读，按 F12 才能改），不再提供日志查看入口
 - 底部任务面板与状态栏（连接状态、下载源、实例统计）
 
+装版本时可选择加载器（原版 / Fabric / Forge / NeoForge）：原版只能装资源包，模组与光影只能装到带加载器的实例。
 内容下载默认走镜像（`/modrinth`、`/modcdn`），镜像不可用时自动回落到 Modrinth 官方源，徽章显示当前通道。
 
 ```bash
@@ -62,8 +65,9 @@ uv run --frozen main.py
 curl http://127.0.0.1:8081/health
 ```
 
-路由：`/meta` `/data` `/libs` `/assets` `/fabric` `/fabricmaven` `/modrinth` `/modcdn`，
-另带 `/health` 与 `/metrics`。带查询串的请求（如 Modrinth 搜索）会完整转发并以 `.q<sha1>` 区分缓存。
+路由：`/meta` `/data` `/libs` `/assets` `/fabric` `/fabricmaven` `/forgemaven` `/neoforgemaven`
+`/modrinth` `/modcdn`，另带 `/health` 与 `/metrics`。带查询串的请求（如 Modrinth 搜索）会完整转发并以 `.q<sha1>` 区分缓存；
+maven 路由下的 `*.xml` 索引按元数据 TTL 缓存，jar 长期缓存。
 
 生产部署见 `server-deploy` 分支的 `DEPLOY.md`（systemd / Docker / nginx / Caddy），
 当前线上：`https://mc.yjlt.top`。
