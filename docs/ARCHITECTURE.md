@@ -3,14 +3,17 @@
 ## 数据流
 
 ```
-客户端                        镜像服务端                     上游
-------                        ----------                     ----
-版本清单  ──/meta/...──────▶  白名单校验 ──▶ 磁盘缓存 ──▶  piston-meta.mojang.com
-版本 JSON ──/meta/v1/...───▶                 │
-client jar──/data/v1/...───▶                 ├──▶ piston-data / launcher.mojang.com
-库文件    ──/libs/...──────▶                 ├──▶ libraries.minecraft.net
-资源对象  ──/assets/xx/...─▶                 ├──▶ resources.download.minecraft.net
-Fabric    ──/fabric/...────▶                 └──▶ meta.fabricmc.net
+客户端                          镜像服务端                      上游
+------                          ----------                     ----
+版本清单  ──/meta/...────────▶  白名单校验 ──▶ 磁盘缓存 ──▶ piston-meta.mojang.com
+版本 JSON ──/meta/v1/...─────▶                 │
+client jar──/data/v1/...─────▶                 ├──▶ piston-data / launcher.mojang.com
+库文件    ──/libs/...────────▶                 ├──▶ libraries.minecraft.net
+资源对象  ──/assets/xx/...───▶                 ├──▶ resources.download.minecraft.net
+Fabric    ──/fabric/...──────▶                 ├──▶ meta.fabricmc.net
+Fabric jar──/fabricmaven/...─▶                 ├──▶ maven.fabricmc.net
+搜索 / 版本──/modrinth/...?...▶                ├──▶ api.modrinth.com（保留查询串）
+内容文件  ──/modcdn/...──────▶                 └──▶ cdn.modrinth.com
 ```
 
 ## URL 重写
@@ -24,8 +27,12 @@ Fabric    ──/fabric/...────▶                 └──▶ meta.fab
 | `libraries.minecraft.net` | `{base}/libs/<path>` |
 | `resources.download.minecraft.net` | `{base}/assets/<path>` |
 | `meta.fabricmc.net` | `{base}/fabric/<path>` |
+| `maven.fabricmc.net` | `{base}/fabricmaven/<path>` |
+| `api.modrinth.com` | `{base}/modrinth/<path>?<query>` |
+| `cdn.modrinth.com` | `{base}/modcdn/<path>` |
 
-未识别主机直接报错，绝不回落到直连。
+未识别主机直接报错，绝不回落到直连。唯一的例外是**内容层**（模组 / 整合包 / 资源包 / 光影）：
+当镜像缺少新路由或返回非 2xx 时会主动回落到 Modrinth 官方 API，以免自建镜像未升级时功能不可用。
 
 ## 安装管线
 
@@ -38,16 +45,44 @@ Fabric    ──/fabric/...────▶                 └──▶ meta.fab
 - 已存在且哈希正确即跳过，支持断网复用与离线包导入；
 - 进度按字节聚合，支持取消与重试。
 
+## 内容管线（模组 / 资源包 / 光影）
+
+```
+搜索（facets：project_type / categories:<加载器> / versions:<MC 版本>）
+→ 版本列表（取 primary 文件 + required 依赖）
+→ 下载（SHA-1 / SHA-512 / size 校验，.part + 原子 rename）
+→ 安装到 <实例游戏目录>/{mods,resourcepacks,shaderpacks}
+```
+
+必需依赖按广度优先安装，单次安装上限 24 个文件，防止异常依赖图无限扩张。
+
+## 整合包管线
+
+```
+.mrpack → modrinth.index.json（dependencies → MC 版本 + loader）
+→ 安装基础版本（Fabric：拉取 loader profile JSON 并展开为版本文件）
+→ 逐个安装 index 文件（相对路径，拒绝 ../ 越界）
+→ 解压 overrides/ → 写 offcraft-pack.json
+```
+
+Forge / NeoForge / Quilt 目前只写占位版本 JSON 并给出警告，不自动安装加载器。
+
 ## 启动管线
 
 ```
 合并 inheritsFrom → rules 过滤 → classpath（客户端 jar 置尾）
 → natives 解压 → 占位符展开（arguments / minecraftArguments）
 → 选择 Java（runtime 组件 / JAVA_HOME / 常见 JDK / PATH）
-→ 子进程启动 + 日志流
+→ 子进程启动（cwd = 游戏目录） + 日志流
 ```
 
 离线账户：`--username` + v3 UUID（`MD5("OfflinePlayer:" + name)`）+ `accessToken=0`。
+
+## 版本隔离
+
+`isolation=true`（默认）时游戏目录 = `versions/<id>/`，`--gameDir` 与子进程工作目录均指向它，
+`options.txt`、`saves`、`mods`、`screenshots` 互不干扰；整合包实例恒为隔离，并通过 `offcraft-pack.json` 定位。
+关闭隔离后回到原生布局（共享 `.minecraft`）。
 
 ## 离线能力
 

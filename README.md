@@ -1,17 +1,18 @@
 # CrMCDownload
 
-自建镜像 + 离线账户的 Minecraft 启动器。客户端（PyQt6）从你的镜像服务器下载原版版本与资源并启动；服务端代理 Mojang / Fabric 官方文件并做磁盘缓存。
+自建镜像 + 离线账户的 Minecraft 启动器。客户端（PyQt6，PCL 风格）从你的镜像服务器下载原版版本、模组、整合包、资源包与光影，
+服务端代理 Mojang / Fabric / Modrinth 文件并做磁盘缓存。
 
-> 背景：2026 年 10 月起，PCL、HMCL 等第三方启动器陆续停止提供游戏下载。本项目把“下载源”做成可自建的镜像服务，客户端只与你的域名通信。
-
-![启动页](docs/images/launch.png)
+> 背景：2026 年 10 月起，PCL、HMCL 等第三方启动器陆续停止提供游戏下载。本项目把“下载源”做成可自建的镜像服务，
+> 客户端默认只与你的域名通信。
 
 ## 组成
 
 ```
-┌──────────── 客户端 (user, PyQt6) ────────────┐      ┌──────── 服务端 (server) ────────┐
-│ 启动 / 下载 / 插件 / 设置 · 离线包 · 日志      │ ───▶ │ 镜像代理 + 磁盘缓存 + 令牌        │ ───▶ Mojang
-└───────────────────────────────────────────────┘ HTTPS └──────────────────────────────────┘
+┌──────────────── 客户端 (user, PyQt6) ────────────┐   ┌──────────── 服务端 (server) ────────────┐
+│ 启动 · 下载中心 · 设置 · 实例 · 离线包 · 日志     │──▶│ 镜像代理 + 磁盘缓存 + 令牌 + metrics      │──▶ Mojang
+│ Modrinth 内容层（模组/整合包/资源包/光影）        │   │ /meta /data /libs /assets /fabric         │──▶ Fabric
+└────────────────────────────────────────────┘HTTPS└─ /fabricmaven /modrinth /modcdn ────────┘──▶ Modrinth
 ```
 
 ## 分支
@@ -19,24 +20,29 @@
 | 分支 | 内容 |
 | --- | --- |
 | `main` | 文档（本分支） |
-| `user` | 客户端集成：入口、配置、打包、集成测试 |
-| `user-downloader` | 镜像重写、代理、下载器、元数据、安装、离线包 |
+| `user` | 客户端集成：入口、配置、实例、内容层、打包、集成测试 |
+| `user-downloader` | 镜像重写、代理、下载器、元数据、安装、离线包、内容层（`offcraft/content/`） |
 | `user-launcher` | 版本解析、rules、classpath、natives、Java、参数、进程 |
-| `user-ui` | PyQt6 界面 |
+| `user-ui` | PyQt6 界面（主题、控件、内容页、主窗口） |
 | `server` | 服务端集成：`main.py` 入口、配置、测试 |
 | `server-mirror` | 镜像核心：路由、缓存、Range、metrics |
 | `server-deploy` | systemd / Docker / Caddy / nginx 部署物 |
 
-每个分支在本地是一个独立 clone，目录名与分支名一致；合并方向 `user-* → user`、`server-* → server`。详见 [docs/BRANCHES.md](docs/BRANCHES.md)。
+每个分支在本地是一个独立 clone，目录名与分支名一致；合并方向 `user-* → user`、`server-* → server`。
+详见 [docs/BRANCHES.md](docs/BRANCHES.md)。
 
 ## 客户端
 
-界面（PCL 风格，窗口宽高比 3:2，左右栏 2:3）：
+左侧固定侧边栏 + 右侧内容区：
 
-- **启动**：左侧头像 / 用户名 / 启动游戏；右侧版本切换、版本目录、Mod 与存档列表、Java 选择（可添加本地 Java）
-- **下载**：正式版 / 快照 / 远古版 / 已安装
-- **插件**：市场 / 官方 / 社区 / 其他 / 已下载
-- **F12**：修改下载源（默认 `https://mc.yjlt.top`）、令牌、代理与并发数
+- **启动游戏**：账号行、版本大图卡、内存滑块、启动主按钮；右侧版本列表（右键：启动 / 版本设置 /
+  打开游戏目录 / 删除实例）与 6 个快捷磁贴
+- **下载中心**：游戏版本（正式版 / 快照 / 远古版 / 已安装，支持搜索与安装最新版）、
+  模组 / 整合包 / 资源包 / 光影（Modrinth 搜索 → 详情 → 版本 → 一键安装）
+- **设置**：游戏目录、版本隔离、Java（自动检测 / 手动添加）、内存、JVM 参数、下载源（地址 / 令牌 / 代理 / 并发）
+- 底部任务面板与状态栏（连接状态、下载源、实例统计）
+
+内容下载默认走镜像（`/modrinth`、`/modcdn`），镜像不可用时自动回落到 Modrinth 官方源，徽章显示当前通道。
 
 ```bash
 cd user
@@ -56,12 +62,16 @@ uv run --frozen main.py
 curl http://127.0.0.1:8081/health
 ```
 
-生产部署见 `server-deploy` 分支的 `DEPLOY.md`（systemd / Docker / nginx / Caddy）。
+路由：`/meta` `/data` `/libs` `/assets` `/fabric` `/fabricmaven` `/modrinth` `/modcdn`，
+另带 `/health` 与 `/metrics`。带查询串的请求（如 Modrinth 搜索）会完整转发并以 `.q<sha1>` 区分缓存。
+
+生产部署见 `server-deploy` 分支的 `DEPLOY.md`（systemd / Docker / nginx / Caddy），
+当前线上：`https://mc.yjlt.top`。
 
 ## 技术栈
 
 - Python 3.12 + uv
-- 客户端 GUI：PyQt6
+- 客户端 GUI：PyQt6（唯一第三方运行期依赖）
 - 服务端：标准库 `ThreadingHTTPServer`，可选 nginx/Caddy 反代
 - 打包：PyInstaller（onedir 文件夹分发，免运行期解压）
 

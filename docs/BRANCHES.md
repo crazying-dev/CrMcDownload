@@ -21,7 +21,7 @@ MC/
 | 分支 | 只能修改 |
 | --- | --- |
 | `user` | `main.py`、`offcraft/__init__.py`、`offcraft/config.py`、`offcraft/instances.py`、`offcraft/logbus.py`、`offcraft/cli.py`、`OffCraft.spec`、`build.ps1`、集成测试 |
-| `user-downloader` | `offcraft/mirror.py`、`offcraft/net/`、`offcraft/meta/`、`offcraft/install/`、`offcraft/pack/` |
+| `user-downloader` | `offcraft/mirror.py`、`offcraft/net/`、`offcraft/meta/`、`offcraft/install/`、`offcraft/pack/`、`offcraft/content/` |
 | `user-launcher` | `offcraft/launch/`、`offcraft/diagnose.py` |
 | `user-ui` | `offcraft/ui/`、`assets/` |
 | `server` | `server_mirror/__init__.py`、服务端入口与集成测试 |
@@ -29,6 +29,9 @@ MC/
 | `server-deploy` | `DEPLOY.md`、`systemd/`、`docker/`、`caddy/`、`nginx/` |
 
 `pyproject.toml`、`uv.lock`、`.python-version`、`.gitignore`、`.gitattributes`、`LICENSE` 为**公共文件**：内容在客户端各分支保持一致、服务端各分支保持一致；冲突时以集成分支为准，并重新 `uv lock`。
+
+`offcraft/content/`（Modrinth 内容层：搜索 / 下载 / 依赖 / 整合包）归 `user-downloader` 所有；
+`offcraft/ui/` 中的 `theme.py` / `widgets.py` / `content_page.py` / `app.py` 归 `user-ui` 所有。
 
 ## 合并流程
 
