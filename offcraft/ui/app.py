@@ -107,6 +107,19 @@ CONTENT_TABS = [
     ("shader", "光影"),
 ]
 
+#: 顶部导航（顺序：启动 → 下载 → 设置 → 插件）
+NAV_ITEMS = [
+    ("home", "启动"),
+    ("download", "下载"),
+    ("settings", "设置"),
+    ("plugins", "插件"),
+]
+
+#: 窗口长宽比 3:2（按草图单位长度换算）
+WINDOW_RATIO = (3, 2)
+WINDOW_DEFAULT = (1200, 800)
+WINDOW_MIN = (1080, 720)
+
 #: 下载中心全部页签（游戏版本 + 内容 + Java）
 DOWNLOAD_TABS = [("game", "游戏版本")] + CONTENT_TABS + [("java", "Java")]
 
@@ -530,15 +543,20 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(APP_NAME)
         self.setWindowIcon(QIcon(block_pixmap("crmcdownload", 64)))
         self.setStyleSheet(app_qss())
-        self.setMinimumSize(1020, 660)
-        width = int((config.window or {}).get("w", 1180) or 1180)
-        height = int((config.window or {}).get("h", 760) or 760)
+        self.setMinimumSize(*WINDOW_MIN)
+        width = int((config.window or {}).get("w", WINDOW_DEFAULT[0]) or WINDOW_DEFAULT[0])
+        # 长宽比固定 3:2：宽度为准，高度由此推算
+        height = int(round(width * WINDOW_RATIO[1] / WINDOW_RATIO[0]))
         screen = QApplication.primaryScreen()
         if screen is not None:
             available = screen.availableGeometry()
+            if height > available.height() - 60:
+                height = max(WINDOW_MIN[1], available.height() - 60)
+                width = int(round(height * WINDOW_RATIO[0] / WINDOW_RATIO[1]))
             width = min(width, available.width() - 40)
-            height = min(height, available.height() - 60)
-        self.resize(max(width, 1020), max(height, 660))
+        width = max(width, WINDOW_MIN[0])
+        height = max(int(round(width * WINDOW_RATIO[1] / WINDOW_RATIO[0])), WINDOW_MIN[1])
+        self.resize(width, height)
 
         self._build()
         QShortcut(QKeySequence("F12"), self, activated=self.open_source_dialog)
@@ -566,14 +584,14 @@ class MainWindow(QMainWindow):
     def _build(self) -> None:
         central = QWidget()
         self.setCentralWidget(central)
-        root = QHBoxLayout(central)
+        root = QVBoxLayout(central)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
-        root.addWidget(self._build_sidebar())
+        root.addWidget(self._build_topbar())
 
         right = QWidget()
         right_layout = QVBoxLayout(right)
-        right_layout.setContentsMargins(18, 16, 18, 8)
+        right_layout.setContentsMargins(18, 14, 18, 8)
         right_layout.setSpacing(10)
         self.stack = QStackedWidget()
         self.pages: dict[str, QWidget] = {
@@ -590,70 +608,58 @@ class MainWindow(QMainWindow):
         root.addWidget(right, 1)
         self.show_page("home")
 
-    def _build_sidebar(self) -> QWidget:
+    def _build_topbar(self) -> QWidget:
+        """顶部导航栏：品牌 | 启动 / 下载 / 设置 / 插件 | 下载源 · 账户。"""
         bar = QFrame()
-        bar.setObjectName("sidebar")
-        bar.setFixedWidth(212)
-        layout = QVBoxLayout(bar)
-        layout.setContentsMargins(14, 18, 12, 14)
-        layout.setSpacing(5)
+        bar.setObjectName("topbar")
+        bar.setFixedHeight(68)
+        layout = QHBoxLayout(bar)
+        layout.setContentsMargins(20, 10, 20, 10)
+        layout.setSpacing(16)
 
-        brand_row = QHBoxLayout()
-        brand_row.setSpacing(10)
         logo = QLabel()
-        logo.setFixedSize(34, 34)
-        logo.setPixmap(block_pixmap("crmcdownload", 34))
-        brand_row.addWidget(logo)
+        logo.setFixedSize(36, 36)
+        logo.setPixmap(block_pixmap("crmcdownload", 36))
+        layout.addWidget(logo)
+
         names = QVBoxLayout()
         names.setSpacing(0)
         title = QLabel(APP_NAME)
         title.setObjectName("brand")
         names.addWidget(title)
-        names.addWidget(self._label(f"v{__version__} · 自建镜像"), )
-        brand_row.addLayout(names, 1)
-        layout.addLayout(brand_row)
-        layout.addSpacing(16)
+        names.addWidget(self._label(f"v{__version__} · 自建镜像", "brandSub"))
+        layout.addLayout(names)
+        layout.addSpacing(24)
 
         self.nav_buttons: dict[str, QPushButton] = {}
         group = QButtonGroup(self)
         group.setExclusive(True)
-        for key, text in (
-            ("home", "启动游戏"),
-            ("download", "下载中心"),
-            ("plugins", "插件"),
-            ("settings", "设置"),
-        ):
+        for key, text in NAV_ITEMS:
             button = QPushButton(text)
             button.setCheckable(True)
-            button.setObjectName("nav")
+            button.setObjectName("topnav")
+            button.setMinimumHeight(36)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
             button.clicked.connect(lambda _c, name=key: self.show_page(name))
             group.addButton(button)
             layout.addWidget(button)
             self.nav_buttons[key] = button
-        layout.addSpacing(14)
-
-        layout.addWidget(self._label("内容下载"))
-        for key, text in CONTENT_TABS:
-            button = QPushButton(text)
-            button.setObjectName("nav")
-            button.clicked.connect(lambda _c, name=key: self.goto_content(name))
-            layout.addWidget(button)
 
         layout.addStretch(1)
 
+        self.source_label = self._label("")
+        self.source_label.setObjectName("mutedSmall")
+        self.source_label.setToolTip("下载源已由发布者固定，按 F12 可打开修改窗口")
+        layout.addWidget(self.source_label)
+
         self.account_button = QPushButton(self.config.username)
-        self.account_button.setObjectName("nav")
-        self.account_button.setIcon(QIcon(initial_pixmap(self.config.username, 26, "account")))
-        self.account_button.setIconSize(QSize(24, 24))
+        self.account_button.setObjectName("segment")
+        self.account_button.setIcon(QIcon(initial_pixmap(self.config.username, 22, "account")))
+        self.account_button.setIconSize(QSize(22, 22))
+        self.account_button.setMinimumHeight(34)
         self.account_button.setToolTip("切换离线账户")
         self.account_button.clicked.connect(self._edit_account)
         layout.addWidget(self.account_button)
-
-        self.source_label = self._label("")
-        self.source_label.setObjectName("mutedSmall")
-        self.source_label.setWordWrap(True)
-        self.source_label.setToolTip("下载源已由发布者固定，按 F12 可打开修改窗口")
-        layout.addWidget(self.source_label)
         return bar
 
     def _build_home_page(self) -> QWidget:
