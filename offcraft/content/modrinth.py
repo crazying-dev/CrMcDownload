@@ -211,6 +211,7 @@ class ModrinthClient:
         self.downloader = downloader or Downloader(
             proxy=proxy or None,
             token=token or None,
+            token_origin=download_base or None,
             workers=4,
             timeout=timeout,
             user_agent=UA,

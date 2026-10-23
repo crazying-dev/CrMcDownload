@@ -106,6 +106,7 @@ class SourceRouter:
         self._prober = downloader or Downloader(
             proxy=proxy or None,
             token=token or None,
+            token_origin=mirror.base_url,
             workers=1,
             timeout=self.timeout,
             retries=0,

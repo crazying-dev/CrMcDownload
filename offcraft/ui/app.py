@@ -2249,6 +2249,7 @@ class MainWindow(QMainWindow):
                 manifest=manifest,
                 instance_name=target_name,
                 isolated=True,
+                allow_untrusted=bool(getattr(self.config, "allow_untrusted_sources", False)),
                 cancel=cancel,
                 phase=self.set_phase,
             )
@@ -2256,7 +2257,11 @@ class MainWindow(QMainWindow):
                 self.post_log("WARN", warning)
             self.config.last_version = result.instance_id
             save_config(self.config, self.data_dir)
-            return f"整合包 {result.instance_id} 安装完成（{result.installed}/{result.total} 个文件）"
+            skipped = f"，跳过 {result.skipped} 个" if result.skipped else ""
+            return (
+                f"整合包 {result.instance_id} 安装完成"
+                f"（{result.installed}/{result.total} 个文件{skipped}）"
+            )
 
         self.run_task(f"安装整合包 {hit.title}", worker)
 
@@ -2324,6 +2329,8 @@ class MainWindow(QMainWindow):
         return Downloader(
             proxy=self.config.proxy or None,
             token=self.config.download_token or None,
+            # 令牌只发给配置的镜像源，官方源/第三方 CDN 一律不带
+            token_origin=self.config.download_base or None,
             workers=workers or self.config.max_workers,
             timeout=30,
             progress_callback=(

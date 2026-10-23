@@ -7,8 +7,8 @@
 from __future__ import annotations
 
 import json
+import os
 import re
-import shutil
 import threading
 import time
 import zipfile
@@ -23,6 +23,7 @@ from offcraft.meta.manifest import VersionManifest
 from offcraft.meta.version import load_version
 from offcraft.mirror import Mirror, UnknownUpstreamError
 from offcraft.net.downloader import Downloader, ProgressTracker
+from offcraft.net.trust import check_url
 
 __all__ = [
     "ModpackError",
@@ -46,6 +47,11 @@ _RESERVED = {
 _INDEX_NAME = "modrinth.index.json"
 _OVERRIDE_PREFIXES = ("overrides/", "client-overrides/")
 _MAX_ARCHIVE_BYTES = 4 * 1024 * 1024 * 1024
+#: 清单文件大小上限（8 MiB）
+_MAX_INDEX_BYTES = 8 * 1024 * 1024
+#: overrides 单文件上限（512 MiB）与成员数上限
+_MAX_OVERRIDE_FILE_BYTES = 512 * 1024 * 1024
+_MAX_OVERRIDE_MEMBERS = 20000
 
 
 class ModpackError(RuntimeError):
@@ -117,6 +123,11 @@ def read_mrpack(archive: Path | str) -> ModpackInfo:
         with zipfile.ZipFile(archive) as zf:
             if _INDEX_NAME not in zf.namelist():
                 raise ModpackError("不是有效的 Modrinth 整合包（缺少 modrinth.index.json）")
+            entry = zf.getinfo(_INDEX_NAME)
+            if entry.file_size > _MAX_INDEX_BYTES:
+                raise ModpackError(
+                    f"modrinth.index.json 过大（{entry.file_size} 字节），已拒绝安装"
+                )
             raw = json.loads(zf.read(_INDEX_NAME).decode("utf-8"))
     except ModpackError:
         raise
@@ -182,6 +193,7 @@ class ModpackResult:
     game_dir: Path
     installed: int = 0
     total: int = 0
+    skipped: int = 0
     warnings: list[str] = field(default_factory=list)
 
 
@@ -249,6 +261,7 @@ def install_modpack(
     manifest: VersionManifest | None = None,
     instance_name: str = "",
     isolated: bool = True,
+    allow_untrusted: bool = False,
     cancel: threading.Event | None = None,
     phase: PhaseHook | None = None,
 ) -> ModpackResult:
@@ -266,6 +279,7 @@ def install_modpack(
     tracker = ProgressTracker()
     warnings: list[str] = []
     installed = 0
+    skipped = 0
 
     # 1) 基础版本
     if not _version_ready(mc_dir, info.mc_version):
@@ -327,9 +341,15 @@ def install_modpack(
         try:
             url = mirror.rewrite(item.url)
         except UnknownUpstreamError:
+            # 镜像不认这个上游：按信任策略判断能否直连
+            blocked = check_url(item.url, allow_untrusted=allow_untrusted)
+            if blocked:
+                skipped += 1
+                warnings.append(f"已跳过 {item.path}：{blocked}")
+                continue
             url = item.url
-            if "外部下载源" not in " ".join(warnings):
-                warnings.append("部分文件来自外部下载源，将直连下载")
+            if "未知来源" not in " ".join(warnings):
+                warnings.append("部分文件来自未知来源，将直连下载（已按策略放行）")
         try:
             download_file(
                 downloader,
@@ -365,14 +385,21 @@ def install_modpack(
         game_dir=game_dir,
         installed=installed,
         total=total,
+        skipped=skipped,
         warnings=warnings,
     )
 
 
 def _extract_overrides(archive: Path, game_dir: Path) -> None:
+    """释放 overrides / client-overrides。
+
+    与离线包导入同一套限制：单文件 512 MiB、总量 4 GiB、成员数 2 万，
+    每个文件先写临时文件再原子替换，超出预算立即中止。
+    """
     try:
         with zipfile.ZipFile(archive) as zf:
             total = 0
+            count = 0
             for entry in zf.infolist():
                 name = entry.filename.replace("\\", "/")
                 prefix = next((p for p in _OVERRIDE_PREFIXES if name.startswith(p)), None)
@@ -385,12 +412,34 @@ def _extract_overrides(archive: Path, game_dir: Path) -> None:
                     safe = _safe_pack_path(relative)
                 except ModpackError:
                     continue
+                count += 1
+                if count > _MAX_OVERRIDE_MEMBERS:
+                    raise ModpackError("overrides 成员过多，已中止解压")
+                if entry.file_size > _MAX_OVERRIDE_FILE_BYTES:
+                    raise ModpackError(f"overrides 中的 {relative} 超过单文件上限")
                 total += entry.file_size
                 if total > _MAX_ARCHIVE_BYTES:
                     raise ModpackError("overrides 体积异常，已中止解压")
                 dest = game_dir / safe
                 dest.parent.mkdir(parents=True, exist_ok=True)
-                with zf.open(entry) as src, dest.open("wb") as dst:
-                    shutil.copyfileobj(src, dst)
+                tmp = dest.with_name(dest.name + ".override-tmp")
+                try:
+                    written = 0
+                    with zf.open(entry) as src, tmp.open("wb") as dst:
+                        while True:
+                            chunk = src.read(1024 * 1024)
+                            if not chunk:
+                                break
+                            written += len(chunk)
+                            if written > _MAX_OVERRIDE_FILE_BYTES:
+                                raise ModpackError(f"overrides 中的 {relative} 实际大小超限")
+                            dst.write(chunk)
+                    os.replace(tmp, dest)
+                finally:
+                    if tmp.exists():
+                        try:
+                            tmp.unlink()
+                        except OSError:
+                            pass
     except zipfile.BadZipFile as exc:
         raise ModpackError(f"overrides 解压失败：{exc}") from exc

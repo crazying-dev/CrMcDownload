@@ -164,6 +164,14 @@ class SourceRouterTest(unittest.TestCase):
         router.rewrite(official)
         self.assertGreater(handler.hits, first, "ttl=0 时不应复用旧结论")
 
+    def test_prober_token_scoped_to_mirror(self) -> None:
+        """探测器的镜像令牌只能发给镜像源，不能随直连探测泄露。"""
+        router = self.router(self.fast_base, token="tkn-123")
+        prober = router._prober
+        self.assertEqual(prober.token_scope(), self.fast_base)
+        self.assertTrue(prober.sends_token(self.fast_base + "/libs/a.jar"))
+        self.assertFalse(prober.sends_token(self.slow_base + "/a.jar"))
+
 
 class MakeSourceTest(unittest.TestCase):
     def test_empty_base_is_direct(self) -> None:

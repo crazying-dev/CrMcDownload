@@ -41,9 +41,12 @@ def _source(args, config: Config):
 
 
 def _downloader(args, config: Config) -> Downloader:
+    base = getattr(args, "base", None) or config.download_base or None
     return Downloader(
         proxy=getattr(args, "proxy", None) or config.proxy or None,
         token=getattr(args, "token", None) or config.download_token or None,
+        # 令牌只发给配置的镜像源
+        token_origin=base,
         workers=int(getattr(args, "workers", None) or config.max_workers),
         timeout=30,
         retries=3,
@@ -165,9 +168,21 @@ def cmd_pack(args, config: Config) -> int:
         for warning in info.warnings:
             print(f"警告：{warning}", file=sys.stderr)
     else:
-        info = import_pack(args.file, mc_dir)
-        print(f"已导入 {info.files} 个文件，{info.bytes / 1048576:.1f} MiB（版本 {info.version_id}）")
+        info = import_pack(args.file, mc_dir, on_conflict=_conflict_policy(args))
+        extra = f"，跳过 {info.skipped} 个" if info.skipped else ""
+        print(
+            f"已导入 {info.files} 个文件，{info.bytes / 1048576:.1f} MiB"
+            f"（版本 {info.version_id}）{extra}"
+        )
     return 0
+
+
+def _conflict_policy(args) -> str:
+    if getattr(args, "force", False):
+        return "overwrite"
+    if getattr(args, "skip_existing", False):
+        return "skip"
+    return "error"
 
 
 def cmd_launch(args, config: Config) -> int:
@@ -278,6 +293,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_pack.add_argument("action", choices=["export", "import"])
     p_pack.add_argument("version", nargs="?", default="")
     p_pack.add_argument("file")
+    p_pack.add_argument("--force", action="store_true", help="已存在的文件直接覆盖")
+    p_pack.add_argument("--skip-existing", action="store_true", help="跳过已存在的文件")
     p_pack.set_defaults(func=cmd_pack)
 
     p_gui = sub.add_parser("gui", help="打开图形界面")

@@ -33,6 +33,8 @@ class Config:
     schema: int = SCHEMA
     download_base: str = "https://mc.yjlt.top"
     download_token: str = ""
+    #: 允许下载整合包里指向未知主机的地址（默认关闭，只放行白名单域）
+    allow_untrusted_sources: bool = False
     #: 每次下载前比较镜像与直连的时延，择快者使用
     prefer_fastest: bool = True
     proxy: str = ""

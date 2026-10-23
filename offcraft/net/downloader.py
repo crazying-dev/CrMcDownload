@@ -26,11 +26,37 @@ __all__ = [
     "DownloadTask",
     "Downloader",
     "ProgressTracker",
+    "origin_of",
+    "parse_origin",
     "sha1_file",
     "verify_file",
 ]
 
 _CHUNK = 256 * 1024
+
+
+def origin_of(url: str) -> tuple[str, str, int] | None:
+    """URL 的 ``(scheme, host, port)``；非 http(s) 或主机非法时返回 None。"""
+    try:
+        parts = urlsplit(str(url or ""))
+        scheme = (parts.scheme or "").lower()
+        host = (parts.hostname or "").lower()
+        if scheme not in ("http", "https") or not host:
+            return None
+        port = parts.port
+    except ValueError:
+        return None
+    return scheme, host, port or (443 if scheme == "https" else 80)
+
+
+def parse_origin(value: str | None) -> tuple[str, str, int] | None:
+    """把 ``https://mc.example.com`` / ``mc.example.com`` 归一化成 origin。"""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if "//" not in text:
+        text = "https://" + text
+    return origin_of(text)
 
 
 class DownloadError(RuntimeError):
@@ -167,6 +193,7 @@ class Downloader:
         *,
         proxy: str | ProxyConfig | None = None,
         token: str | None = None,
+        token_origin: str | None = None,
         workers: int = 8,
         timeout: float = 30.0,
         retries: int = 3,
@@ -176,6 +203,8 @@ class Downloader:
     ) -> None:
         self.proxy = parse_proxy(proxy) if isinstance(proxy, str) else proxy
         self.token = token or None
+        #: 只有目标 origin 与它完全一致时才向请求头里加镜像令牌
+        self.token_origin = parse_origin(token_origin) if self.token else None
         self.workers = max(1, int(workers))
         self.timeout = timeout
         self.retries = max(0, int(retries))
@@ -187,14 +216,28 @@ class Downloader:
         self._pool = threading.local()
 
     # ------------------------------------------------------------------ HTTP
-    def _headers(self, extra: dict[str, str] | None = None) -> dict[str, str]:
+    def token_scope(self) -> str:
+        """便于日志/界面展示的令牌作用域（未配置时为空）。"""
+        if self.token_origin is None:
+            return ""
+        scheme, host, port = self.token_origin
+        return f"{scheme}://{host}:{port}"
+
+    def sends_token(self, url: str) -> bool:
+        """这次请求会不会带上镜像令牌：仅当 scheme/host/port 与镜像源完全一致。"""
+        if not self.token or self.token_origin is None:
+            return False
+        return origin_of(url) == self.token_origin
+
+    def _headers(self, url: str, extra: dict[str, str] | None = None) -> dict[str, str]:
         headers = {
             "User-Agent": self.user_agent,
             "Accept": "*/*",
             "Accept-Encoding": "identity",
         }
-        if self.token:
-            headers["X-OffCraft-Token"] = self.token
+        # 令牌只能发给配置的镜像源：官方源、第三方 CDN、明文外链一律不带
+        if self.sends_token(url):
+            headers["X-OffCraft-Token"] = self.token or ""
         if extra:
             headers.update(extra)
         return headers
@@ -231,7 +274,7 @@ class Downloader:
         path = parts.path or "/"
         if parts.query:
             path += "?" + parts.query
-        headers = self._headers({"Range": f"bytes=0-{max(first_chunk - 1, 0)}"})
+        headers = self._headers(url, {"Range": f"bytes=0-{max(first_chunk - 1, 0)}"})
         started = time.monotonic()
         conn = self._new_connection(scheme, host, port, timeout)
         try:
@@ -260,7 +303,7 @@ class Downloader:
         path = parts.path or "/"
         if parts.query:
             path += "?" + parts.query
-        headers = self._headers(extra_headers)
+        headers = self._headers(url, extra_headers)
 
         pool = self._pooled()
         conn = pool.pop(key, None)

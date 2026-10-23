@@ -12,6 +12,8 @@ from offcraft.net.downloader import (
     Downloader,
     DownloadReport,
     ProgressTracker,
+    origin_of,
+    parse_origin,
     verify_file,
 )
 
@@ -22,12 +24,14 @@ PAYLOAD_SHA1 = hashlib.sha1(PAYLOAD).hexdigest()
 class _Handler(BaseHTTPRequestHandler):
     payload = PAYLOAD
     hits: list[tuple[str, str | None]] = []
+    tokens: list[str | None] = []
 
     def log_message(self, *args):  # noqa: D401 - 静默
         pass
 
     def do_GET(self):  # noqa: N802 - BaseHTTPRequestHandler 约定
         _Handler.hits.append((self.path, self.headers.get("Range")))
+        _Handler.tokens.append(self.headers.get("X-OffCraft-Token"))
         if self.path.startswith("/missing"):
             self.send_error(404)
             return
@@ -142,6 +146,79 @@ class DownloaderTest(unittest.TestCase):
             report = Downloader().run([task], cancel=cancel)
             self.assertFalse(report.ok)
             self.assertEqual(report.failed[0][1], "已取消")
+
+
+class TokenScopeTest(unittest.TestCase):
+    """镜像令牌只能发给配置的镜像源（Issue #1 P1）。"""
+
+    TOKEN = "secret-token"
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+        cls.port = cls.server.server_address[1]
+        cls.base = f"http://127.0.0.1:{cls.port}"
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.server.shutdown()
+        cls.server.server_close()
+
+    def setUp(self) -> None:
+        _Handler.tokens.clear()
+
+    def _fetch(self, downloader: Downloader, url: str) -> None:
+        with TemporaryDirectory() as tmp:
+            task = DownloadTask(url, Path(tmp) / "a.bin")
+            downloader.run([task])
+
+    def test_mirror_origin_gets_token(self) -> None:
+        downloader = Downloader(token=self.TOKEN, token_origin=self.base, retries=0)
+        self._fetch(downloader, f"{self.base}/a")
+        self.assertEqual(_Handler.tokens, [self.TOKEN])
+
+    def test_token_scope_normalised(self) -> None:
+        downloader = Downloader(token=self.TOKEN, token_origin=f"{self.base}/", retries=0)
+        self.assertEqual(downloader.token_scope(), f"http://127.0.0.1:{self.port}")
+        self.assertTrue(downloader.sends_token(f"{self.base}/x/y"))
+
+    def test_other_host_gets_no_token(self) -> None:
+        downloader = Downloader(
+            token=self.TOKEN, token_origin="https://mc.example.com", retries=0
+        )
+        self._fetch(downloader, f"{self.base}/a")
+        self.assertEqual(_Handler.tokens, [None])
+
+    def test_other_scheme_gets_no_token(self) -> None:
+        # 同一主机的 https origin 不得因 http 请求而泄漏令牌
+        downloader = Downloader(token=self.TOKEN, token_origin=f"https://127.0.0.1:{self.port}")
+        self._fetch(downloader, f"{self.base}/a")
+        self.assertEqual(_Handler.tokens, [None])
+
+    def test_other_port_gets_no_token(self) -> None:
+        downloader = Downloader(token=self.TOKEN, token_origin="http://127.0.0.1:9")
+        self.assertFalse(downloader.sends_token(f"{self.base}/a"))
+
+    def test_no_token_origin_sends_nothing(self) -> None:
+        downloader = Downloader(token=self.TOKEN, retries=0)
+        self.assertEqual(downloader.token_scope(), "")
+        self._fetch(downloader, f"{self.base}/a")
+        self.assertEqual(_Handler.tokens, [None])
+
+    def test_probe_does_not_leak_token(self) -> None:
+        downloader = Downloader(token=self.TOKEN, token_origin="https://mc.example.com", retries=0)
+        downloader.probe(f"{self.base}/a", first_chunk=64, timeout=5)
+        self.assertEqual(_Handler.tokens, [None])
+
+    def test_origin_helpers(self) -> None:
+        self.assertEqual(origin_of("https://a.b/c"), ("https", "a.b", 443))
+        self.assertEqual(origin_of("http://a.b:8080/c"), ("http", "a.b", 8080))
+        self.assertIsNone(origin_of("ftp://a.b/c"))
+        self.assertIsNone(origin_of("not a url"))
+        self.assertEqual(parse_origin("mc.example.com"), ("https", "mc.example.com", 443))
+        self.assertIsNone(parse_origin(""))
 
 
 if __name__ == "__main__":
