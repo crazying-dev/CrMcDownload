@@ -255,10 +255,10 @@ QLabel#muted {{ color: {MUTED}; font-size: 9pt; }}
 QLabel#mutedSmall {{ color: {MUTED}; font-size: 8pt; }}
 QLabel#heroName {{ font-size: 20pt; font-weight: 700; }}
 QLineEdit#heroName {{
-    font-size: 14pt;
+    font-size: 11pt;
     font-weight: 700;
-    padding: 4px 8px;
-    border-radius: 10px;
+    padding: 2px 8px;
+    border-radius: 8px;
 }}
 QComboBox#heroVersion {{
     font-size: 13pt;
@@ -267,6 +267,14 @@ QComboBox#heroVersion {{
     border-radius: 10px;
 }}
 QComboBox#heroVersion QAbstractItemView {{ font-size: 10pt; }}
+QPushButton#heroMenu {{
+    font-size: 16pt;
+    font-weight: 700;
+    color: {MUTED};
+    padding: 0px;
+    border-radius: 10px;
+}}
+QPushButton#heroMenu:hover {{ color: {TEXT}; }}
 QLabel#versionTag {{ color: #B4BCC9; font-size: 8pt; }}
 QListWidget#homeList {{ background: transparent; }}
 QListWidget#homeList::item {{ padding: 6px 4px; border-radius: 7px; }}
@@ -327,8 +335,8 @@ QPushButton#accentBig {{
     background: {ACCENT};
     color: #FFFFFF;
     border: none;
-    border-radius: 11px;
-    font-size: 14pt;
+    border-radius: 10px;
+    font-size: 12.5pt;
     font-weight: 700;
 }}
 QPushButton#accentBig:hover {{ background: #3D7BEC; }}
