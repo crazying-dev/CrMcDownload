@@ -13,9 +13,14 @@ __all__ = [
     "discover_instances",
     "instance_game_dir",
     "read_pack_metadata",
+    "rename_instance",
+    "safe_instance_id",
 ]
 
 _VERSION_RE = re.compile(r"^\d+(?:\.\d+)+")
+
+#: 目录名里不允许出现的字符（Windows）
+_BAD_ID = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,3 +124,75 @@ def discover_instances(mc_dir: Path | str) -> list[Instance]:
         )
     result.sort(key=lambda item: item.mtime, reverse=True)
     return result
+
+
+def safe_instance_id(name: str, fallback: str = "") -> str:
+    """把用户输入变成可用的版本目录名（兼显示名）。"""
+    cleaned = _BAD_ID.sub("_", str(name or "").strip()).strip(". ")
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned[:48] or (fallback or "")
+
+
+def _inheriting(mc_dir: Path, version_id: str) -> list[str]:
+    """列出所有 ``inheritsFrom == version_id`` 的已装版本。"""
+    versions = mc_dir / "versions"
+    users: list[str] = []
+    if not versions.is_dir():
+        return users
+    for folder in versions.iterdir():
+        if not folder.is_dir() or folder.name == version_id:
+            continue
+        path = folder / f"{folder.name}.json"
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(raw, dict) and str(raw.get("inheritsFrom") or "") == version_id:
+            users.append(folder.name)
+    return users
+
+
+def rename_instance(mc_dir: Path | str, old_id: str, new_id: str) -> tuple[str, str]:
+    """把 ``versions/<old_id>`` 改名成 ``new_id``（同时改 JSON 文件名与 ``id`` 字段）。
+
+    返回 ``(最终 id, 提示)``；以下情况保留原名并给出原因：
+
+    * 新名字为空 / 非法 / 与原名字相同；
+    * 同名目录已存在；
+    * 还有其他版本 ``inheritsFrom`` 它（改名会让那些版本失效，例如 Forge 依赖原版）。
+    """
+    mc_dir = Path(mc_dir)
+    old_id = str(old_id or "").strip()
+    new_id = safe_instance_id(new_id)
+    if not old_id or not new_id or new_id == old_id:
+        return old_id, ""
+    old_dir = mc_dir / "versions" / old_id
+    if not old_dir.is_dir():
+        return old_id, f"找不到版本目录 {old_id}"
+    new_dir = mc_dir / "versions" / new_id
+    if new_dir.exists():
+        return old_id, f"{new_id} 已存在，保留原名 {old_id}"
+    users = _inheriting(mc_dir, old_id)
+    if users:
+        return old_id, f"{'、'.join(users[:3])} 还在用 {old_id}，保留原名"
+    try:
+        old_dir.rename(new_dir)
+    except OSError as exc:
+        return old_id, f"改名失败：{exc}"
+    old_json = new_dir / f"{old_id}.json"
+    new_json = new_dir / f"{new_id}.json"
+    if old_json.is_file():
+        try:
+            raw = json.loads(old_json.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                raw["id"] = new_id
+                new_json.write_text(
+                    json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+                old_json.unlink(missing_ok=True)
+        except (OSError, ValueError):
+            try:
+                old_json.rename(new_json)
+            except OSError:
+                pass
+    return new_id, ""

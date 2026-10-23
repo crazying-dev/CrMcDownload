@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from typing import Callable
 
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import QEvent, QObject, Qt, pyqtSignal
 from PyQt6.QtWidgets import (
+    QComboBox,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -17,7 +18,37 @@ from PyQt6.QtWidgets import (
 from offcraft.content.modrinth import ProjectHit
 from offcraft.ui.theme import ACCENT, MUTED, TEXT, human_count, initial_pixmap
 
-__all__ = ["Badge", "Card", "ContentRow", "ElidedLabel", "Tile"]
+__all__ = ["Badge", "Card", "ComboPolisher", "ContentRow", "ElidedLabel", "Tile", "polish_combo"]
+
+
+def polish_combo(combo: QComboBox) -> None:
+    """去掉下拉列表默认的黑色外框（Qt 弹出视图自带 FrameShape + 系统窗口边）。"""
+    view = combo.view()
+    if view is None:
+        return
+    try:
+        view.setFrameShape(QFrame.Shape.NoFrame)
+        window = view.window()
+        if window is not None and window is not view:
+            # 弹出容器本身是横跨全屏的无名 QFrame，给了样式才会跟主题走
+            window.setObjectName("comboPopup")
+            window.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+            window.setWindowFlag(Qt.WindowType.NoDropShadowWindowHint, True)
+        combo.setMaxVisibleItems(14)
+    except (AttributeError, RuntimeError):
+        pass
+
+
+class ComboPolisher(QObject):
+    """全局事件过滤器：每个下拉框在首次绘制前都会被去掉黑边。"""
+
+    def eventFilter(self, obj, event):  # noqa: N802 - Qt 命名
+        if isinstance(obj, QComboBox) and event.type() in (
+            QEvent.Type.Polish,
+            QEvent.Type.Show,
+        ):
+            polish_combo(obj)
+        return False
 
 
 class Card(QFrame):

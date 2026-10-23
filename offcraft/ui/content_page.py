@@ -10,6 +10,7 @@ from PyQt6.QtCore import Qt, QUrl
 from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import (
     QComboBox,
+    QFileDialog,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -20,9 +21,15 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from offcraft.content.install import CONTENT_DIRS
-from offcraft.content.loader import supports_mods
 from offcraft.content.modrinth import ContentError, ProjectHit, ProjectVersion
+from offcraft.content.target import (
+    KIND_NAMES,
+    Target,
+    target_from_folder,
+    target_from_instance,
+    target_state,
+)
+from offcraft.instances import read_pack_metadata
 from offcraft.ui.theme import MUTED, human_count, initial_pixmap
 from offcraft.ui.widgets import Badge, Card, ContentRow, ElidedLabel
 
@@ -62,6 +69,8 @@ class ContentPage(QWidget):
         self.offset = 0
         self.selected: ProjectHit | None = None
         self.versions: list[ProjectVersion] = []
+        #: 手动挑选的文件夹目标（与实例目标一起组成下拉列表）
+        self.extra_targets: list[Target] = []
         self._token = 0
         self._build()
 
@@ -178,9 +187,21 @@ class ContentPage(QWidget):
             detail.add(self.name_edit)
         else:
             detail.add(self._label("安装到", "muted"))
-            self.instance_combo = QComboBox()
-            self.instance_combo.currentIndexChanged.connect(self._on_instance_changed)
-            detail.add(self.instance_combo)
+            self.target_row = QHBoxLayout()
+            self.target_row.setSpacing(6)
+            self.target_combo = QComboBox()
+            self.target_combo.setToolTip("选择已装版本（自动换算成它的游戏目录）或任意游戏文件夹")
+            self.target_combo.currentIndexChanged.connect(self._on_target_changed)
+            self.target_row.addWidget(self.target_combo, 1)
+            self.folder_button = QPushButton("选目录")
+            self.folder_button.setFixedWidth(62)
+            self.folder_button.setToolTip("选择一个游戏文件夹（例如别处的 .minecraft 或整合包目录）")
+            self.folder_button.clicked.connect(self.pick_folder)
+            self.target_row.addWidget(self.folder_button)
+            detail.add_layout(self.target_row)
+            self.target_path = self._label("", "mutedSmall")
+            self.target_path.setWordWrap(True)
+            detail.add(self.target_path)
 
         self.install_button = QPushButton("安装所选版本")
         self.install_button.setObjectName("accent")
@@ -218,7 +239,7 @@ class ContentPage(QWidget):
     def _mc_dir(self) -> Path:
         return self.window.game_dir()
 
-    def _refresh_filters(self) -> None:
+    def _refresh_filters(self, select_key: str = "") -> None:
         current_game = self.game_combo.currentData()
         current_loader = self.loader_combo.currentData()
         instances = list(self.window.instances)
@@ -251,21 +272,109 @@ class ContentPage(QWidget):
         self.loader_combo.blockSignals(False)
 
         if self.kind != "modpack":
-            self.instance_combo.blockSignals(True)
-            self.instance_combo.clear()
-            for item in instances:
-                self.instance_combo.addItem(self._instance_text(item), item)
-            if selected is not None:
-                target = self.instance_combo.findData(selected)
-                if target >= 0:
-                    self.instance_combo.setCurrentIndex(target)
-            self.instance_combo.blockSignals(False)
-            self._refresh_install_state()
+            self._rebuild_targets(select_key)
 
         try:
             self.mode_badge.setText(f"Modrinth · {self.window.content_client().api_mode}")
         except Exception:  # noqa: BLE001
             pass
+
+    # ---------------------------------------------------------------- target
+    def target_options(self) -> list[Target]:
+        """已装版本 + 手动选的文件夹，按路径去重。"""
+        mc_dir = self._mc_dir()
+        options: list[Target] = []
+        for item in list(self.window.instances):
+            isolated = bool(getattr(self.window.config, "isolation", False)) or (
+                read_pack_metadata(mc_dir, item.id) is not None
+            )
+            options.append(target_from_instance(mc_dir, item, isolated=isolated))
+        seen = {option.key for option in options}
+        for extra in self.extra_targets:
+            if extra.key not in seen:
+                seen.add(extra.key)
+                options.append(extra)
+        return options
+
+    @staticmethod
+    def _target_text(target: Target) -> str:
+        if target.source == "instance":
+            return f"{target.instance_id} · {target.loader or '原版'}"
+        name = Path(target.path).name or str(target.path)
+        loader = target.loader or "未知版本"
+        return f"{name} · 文件夹（{loader}）"
+
+    def _rebuild_targets(self, select_key: str = "") -> None:
+        options = self.target_options()
+        current = self.target_combo.currentData()
+        keep = select_key or (current.key if isinstance(current, Target) else "")
+        self.target_combo.blockSignals(True)
+        self.target_combo.clear()
+        for target in options:
+            self.target_combo.addItem(self._target_text(target), target)
+        index = -1
+        if keep:
+            for position, target in enumerate(options):
+                if target.key == keep:
+                    index = position
+                    break
+        if index < 0:
+            selected = self.window.selected_instance()
+            if selected is not None:
+                for position, target in enumerate(options):
+                    if target.instance_id == selected.id:
+                        index = position
+                        break
+        if index < 0 and options:
+            index = 0
+        self.target_combo.setCurrentIndex(index)
+        self.target_combo.blockSignals(False)
+        self._refresh_install_state()
+
+    def current_target(self) -> Target | None:
+        target = self.target_combo.currentData()
+        return target if isinstance(target, Target) else None
+
+    def pick_folder(self) -> None:
+        """手动挑一个游戏文件夹作为安装目标。"""
+        start = str(self._mc_dir())
+        target = self.current_target()
+        if target is not None and Path(target.path).is_dir():
+            start = str(target.path)
+        folder = QFileDialog.getExistingDirectory(
+            self, f"选择要安装{KIND_NAMES.get(self.kind, '内容')}的游戏文件夹", start
+        )
+        if not folder:
+            return
+        picked = target_from_folder(folder)
+        if not any(item.key == picked.key for item in self.extra_targets):
+            self.extra_targets.append(picked)
+        self._rebuild_targets(select_key=picked.key)
+        self._match_filters(picked)
+        ok, reason = target_state(picked, self.kind)
+        if not ok:
+            self.window.notice(reason, "WARN")
+        elif picked.mc_version:
+            self.window.notice(
+                f"安装目标：{picked.mc_version} · {picked.loader or '未知加载器'}，列表已按它筛选",
+                "INFO",
+            )
+
+    def _match_filters(self, target: Target) -> None:
+        """把筛选框对齐到目标，避免装错游戏版本 / 加载器的内容。"""
+        changed = False
+        index = self.game_combo.findData(target.mc_version) if target.mc_version else -1
+        if index >= 0 and self.game_combo.currentIndex() != index:
+            self.game_combo.setCurrentIndex(index)  # 信号会触发 reload
+            changed = True
+        if self.kind in ("mod", "modpack") and self.loader_combo.isVisible():
+            loader = (target.loader or "").lower()
+            lindex = self.loader_combo.findData(loader) if loader else -1
+            if lindex >= 0 and self.loader_combo.currentIndex() != lindex:
+                self.loader_combo.setCurrentIndex(lindex)
+                changed = True
+        if not changed:
+            self.reload()
 
     def _filters(self) -> tuple[str, str, str, str]:
         return (
@@ -436,41 +545,44 @@ class ContentPage(QWidget):
             self.name_edit.setText(f"{self.selected.title} {version.label}" if self.selected else "")
         self._refresh_install_state()
 
-    def _on_instance_changed(self, _index: int) -> None:
+    def _on_target_changed(self, _index: int) -> None:
         self._refresh_install_state()
 
-    @staticmethod
-    def _instance_text(item) -> str:
-        if supports_mods(item.loader):
-            return f"{item.id}（{item.loader}）"
-        return f"{item.id}（原版·不支持模组）"
+    def _dest_text(self, dest: Path) -> str:
+        """安装目标路径的短描述：游戏目录下只显示相对部分。"""
+        try:
+            return f"游戏目录\\{Path(dest).relative_to(self._mc_dir())}"
+        except ValueError:
+            return "…\\" + "\\".join(Path(dest).parts[-3:])
 
     def _refresh_install_state(self) -> None:
-        """安装按钮：要有版本，且模组 / 光影只能装到带加载器的实例。"""
+        """安装按钮：要有版本，且目标目录能装这种内容。"""
         if not hasattr(self, "install_button"):
             return
         version = self._version()
+        if self.kind == "modpack":
+            self.install_button.setEnabled(version is not None)
+            return
+        target = self.current_target()
+        if target is None:
+            self.install_button.setEnabled(False)
+            self.target_path.setText("还没有可选的游戏目录：先下载一个版本，或点「选目录」手动选择")
+            self.detail_hint.setText("先安装一个游戏版本，才能安装内容。")
+            return
+        dest = target.subdir(self.kind)
+        self.target_path.setText(self._dest_text(dest))
+        ok, reason = target_state(target, self.kind)
+        self.target_path.setToolTip(f"{dest}\n{reason}" if reason else str(dest))
+        if not ok:
+            self.install_button.setEnabled(False)
+            self.detail_hint.setText(reason)
+            return
         if version is None:
             self.install_button.setEnabled(False)
             return
-        if self.kind == "modpack":
-            self.install_button.setEnabled(True)
-            return
-        instance = self.instance_combo.currentData()
-        if instance is None:
-            self.install_button.setEnabled(False)
-            self.detail_hint.setText("先安装一个游戏版本，才能安装内容。")
-            return
-        if self.kind in ("mod", "shader") and not supports_mods(instance.loader):
-            self.install_button.setEnabled(False)
-            what = "模组" if self.kind == "mod" else "光影"
-            self.detail_hint.setText(
-                f"{instance.id} 是原版实例，不能装{what}。"
-                "请在「启动」页右键该版本 → 安装加载器…"
-                "（Fabric / Forge / NeoForge），或换个实例。"
-            )
-            return
         self.install_button.setEnabled(True)
+        if reason:
+            self.detail_hint.setText(reason)
 
     def _open_page(self) -> None:
         if self.selected is not None:
@@ -488,16 +600,12 @@ class ContentPage(QWidget):
         if self.kind == "modpack":
             self.window.install_modpack(hit, version, self.name_edit.text().strip())
             return
-        instance = self.instance_combo.currentData()
-        if instance is None:
-            self.window.notice("请先安装一个游戏版本，再安装内容", "WARN")
+        target = self.current_target()
+        if target is None:
+            self.window.notice("请先选择安装位置：已装版本或任意游戏文件夹", "WARN")
             return
-        if self.kind in ("mod", "shader") and not supports_mods(instance.loader):
-            self.window.notice(
-                f"{instance.id} 是原版实例，不能安装模组 / 光影。"
-                "请在「启动」页右键该版本 → 安装加载器…（Fabric / Forge / NeoForge）",
-                "WARN",
-            )
+        ok, reason = target_state(target, self.kind)
+        if not ok:
+            self.window.notice(reason, "WARN")
             return
-        dest = self.window.game_dir_for(instance) / CONTENT_DIRS[self.kind]
-        self.window.install_content(hit, version, dest, instance, self.kind)
+        self.window.install_content(hit, version, target, self.kind)

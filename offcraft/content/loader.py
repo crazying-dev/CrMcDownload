@@ -16,10 +16,16 @@ from offcraft.net.downloader import DownloadTask, Downloader, ProgressTracker
 
 __all__ = [
     "LOADERS",
+    "LOADER_CONFLICTS",
+    "LOADER_ROWS",
     "LoaderBuild",
     "LoaderError",
     "install_loader",
     "list_loader_versions",
+    "loader_note",
+    "loader_support",
+    "loader_title",
+    "mc_sort_key",
     "supports_mods",
 ]
 
@@ -30,6 +36,19 @@ LOADERS: list[tuple[str, str]] = [
     ("forge", "Forge"),
     ("neoforge", "NeoForge"),
 ]
+
+#: 安装页里的加载器行（顺序即展示顺序，第一个高的行是原版）
+LOADER_ROWS: list[tuple[str, str, str]] = [
+    ("fabric", "Fabric", "轻量、随版本更新最快；绝大多数客户端模组优先支持 Fabric。"),
+    ("neoforge", "NeoForge", "Forge 的社区分支，1.20.2 及以后的新版本首选，API 与 Forge 同源。"),
+    ("forge", "Forge", "老牌加载器，1.12.2 等旧版本与旧整合包生态最完整。"),
+]
+
+#: 互斥的加载器：同一实例 / 同一 MC 版本只能装其中一个
+LOADER_CONFLICTS: dict[str, tuple[str, ...]] = {
+    "forge": ("neoforge",),
+    "neoforge": ("forge",),
+}
 
 #: 能装模组 / 光影的加载器
 MOD_LOADERS = {"Fabric", "Forge", "NeoForge", "Quilt"}
@@ -55,6 +74,56 @@ class LoaderError(RuntimeError):
 def supports_mods(loader: str) -> bool:
     """该实例是否支持模组 / 光影（原版实例不支持）。"""
     return str(loader or "").strip() in MOD_LOADERS
+
+
+def loader_title(loader: str) -> str:
+    """``fabric`` → ``Fabric``；未知 key 原样返回。"""
+    key = str(loader or "").strip().lower()
+    return dict(LOADERS).get(key, str(loader or ""))
+
+
+def mc_sort_key(mc_version: str) -> tuple[int, ...]:
+    """把 ``1.20.2`` / ``26.3`` 这类版本号变成可比较的元组。"""
+    return _version_key(mc_version)
+
+
+def loader_support(
+    loader: str, mc_version: str, *, version_type: str = "release"
+) -> tuple[bool, str]:
+    """静态兼容性判断：该加载器能不能装到这个 MC 版本上。
+
+    只靠版本号规则（不联网），返回 ``(是否兼容, 不兼容原因)``。
+    """
+    key = str(loader or "").strip().lower()
+    if key in ("", "vanilla"):
+        return True, ""
+    if version_type and version_type != "release":
+        return False, "加载器只提供正式版，快照 / 远古版请装原版"
+    version = mc_sort_key(mc_version)
+    if key == "fabric":
+        if version and version < (1, 14):
+            return False, "Fabric 只支持 1.14 及以上版本"
+        return True, ""
+    if key == "neoforge":
+        if version and version < (1, 20, 2):
+            return False, "NeoForge 只支持 1.20.2 及以上版本"
+        return True, ""
+    if key == "forge":
+        return True, ""
+    return False, f"未知加载器：{loader}"
+
+
+def loader_note(loader: str, mc_version: str) -> str:
+    """展示用的中性提示（不阻止安装）。"""
+    key = str(loader or "").strip().lower()
+    version = mc_sort_key(mc_version)
+    if key == "forge" and version and version >= (1, 20, 4):
+        return "1.20.4 之后官方建议改用 NeoForge"
+    if key == "fabric":
+        return "需要 Fabric API 才能跑大多数模组"
+    if key == "neoforge":
+        return "与 Forge 不能同时安装"
+    return ""
 
 
 @dataclass(slots=True)

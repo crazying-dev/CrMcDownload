@@ -30,6 +30,7 @@ __all__ = [
     "human_date",
     "initial_pixmap",
     "loader_color",
+    "loader_pixmap",
 ]
 
 BG = "#F1F4F9"
@@ -64,6 +65,15 @@ PALETTE = [
     "#8C7A3F",
     "#4C6B8A",
 ]
+
+#: 加载器徽标上的简称
+LOADER_MARKS = {
+    "Fabric": "Fa",
+    "NeoForge": "NF",
+    "Forge": "Fo",
+    "Quilt": "Q",
+    "原版": "MC",
+}
 
 
 def _seed_value(seed: str) -> int:
@@ -184,6 +194,34 @@ def initial_pixmap(text: str, size: int = 44, seed: str = "") -> QPixmap:
     return pix
 
 
+def loader_pixmap(name: str, size: int = 44, dimmed: bool = False) -> QPixmap:
+    """加载器徽标：圆角方块 + 简称（Fabric→Fa / NeoForge→NF / Forge→Fo）。"""
+    ratio = 2
+    pix = QPixmap(size * ratio, size * ratio)
+    pix.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pix)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.scale(ratio, ratio)
+    base = QColor(loader_color(name))
+    if dimmed:
+        base = QColor(base).lighter(150)
+    gradient = QLinearGradient(0, 0, size, size)
+    gradient.setColorAt(0, base.lighter(112))
+    gradient.setColorAt(1, base.darker(118))
+    painter.setBrush(gradient)
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.drawRoundedRect(QRectF(0, 0, size, size), size * 0.26, size * 0.26)
+    text = LOADER_MARKS.get(name or "") or (str(name or "?")[:2])
+    painter.setPen(QColor("#FFFFFF") if not dimmed else QColor("#F3F6FA"))
+    font = QFont("Microsoft YaHei UI", int(size * 0.34))
+    font.setBold(True)
+    painter.setFont(font)
+    painter.drawText(QRectF(0, 0, size, size), Qt.AlignmentFlag.AlignCenter, text)
+    painter.end()
+    pix.setDevicePixelRatio(ratio)
+    return pix
+
+
 def human_size(value: int | float) -> str:
     size = float(value or 0)
     for unit in ("B", "KiB", "MiB", "GiB"):
@@ -245,6 +283,42 @@ QFrame#tile {{
 QFrame#tile:hover {{
     background: {ACCENT_SOFT};
     border-color: #C9D8F5;
+}}
+QFrame#installHead {{
+    background: {CARD};
+    border: 1px solid {BORDER};
+    border-radius: 12px;
+}}
+QFrame#loaderRow {{
+    background: #F7F9FD;
+    border: 1px solid {BORDER};
+    border-radius: 12px;
+}}
+QFrame#loaderRow:hover {{
+    background: #F2F6FE;
+    border-color: #C9D8F5;
+}}
+QFrame#loaderRow[picked="true"] {{
+    background: {ACCENT_SOFT};
+    border: 2px solid {ACCENT};
+}}
+QFrame#loaderRow[dimmed="true"] {{
+    background: #F4F6F9;
+    border-color: #E8ECF3;
+}}
+QLabel#dimTitle {{ color: #AEB6C4; font-size: 11pt; font-weight: 700; }}
+QLabel#dimText {{ color: #B6BDC9; font-size: 8.8pt; }}
+QLineEdit#dirName {{
+    font-size: 11.5pt;
+    font-weight: 700;
+    padding: 3px 8px;
+}}
+QLabel#stepBadge {{
+    background: #EEF3FB;
+    color: #5E6A7C;
+    border-radius: 8px;
+    padding: 2px 8px;
+    font-size: 8.5pt;
 }}
 QLabel#brand {{ font-size: 14pt; font-weight: 700; color: {TEXT}; }}
 QLabel#brandSub {{ font-size: 8pt; color: {MUTED}; }}
@@ -380,8 +454,15 @@ QComboBox QAbstractItemView {{
     border: 1px solid {BORDER};
     border-radius: 8px;
     padding: 4px;
+    outline: 0;
     selection-background-color: {ACCENT_SOFT};
     selection-color: {TEXT};
+}}
+QFrame#comboPopup {{ background: transparent; border: none; }}
+QComboBox QAbstractItemView::item {{
+    min-height: 26px;
+    padding: 2px 8px;
+    border-radius: 6px;
 }}
 QCheckBox {{ spacing: 8px; }}
 QCheckBox::indicator {{

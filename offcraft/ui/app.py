@@ -72,12 +72,20 @@ from offcraft.content.loader import (
     supports_mods,
 )
 from offcraft.content.modpack import unique_instance_name
+from offcraft.content.target import (
+    CONTENT_SUBDIRS,
+    Target,
+    target_from_instance,
+    target_state,
+)
 from offcraft.content.modrinth import ModrinthClient, ProjectHit, ProjectVersion
 from offcraft.instances import (
     Instance,
     discover_instances,
     instance_game_dir,
     read_pack_metadata,
+    rename_instance,
+    safe_instance_id,
 )
 from offcraft.launch.auth import make_profile, validate_name
 from offcraft.launch.command import LaunchOptions, build_command
@@ -88,6 +96,7 @@ from offcraft.meta.version import load_version
 from offcraft.net.downloader import Downloader, ProgressTracker
 from offcraft.net.latency import make_source
 from offcraft.ui.content_page import ContentPage
+from offcraft.ui.install_page import InstallPage
 from offcraft.ui.theme import (
     DANGER,
     OK,
@@ -97,7 +106,7 @@ from offcraft.ui.theme import (
     human_size,
     initial_pixmap,
 )
-from offcraft.ui.widgets import Badge, Card, ElidedLabel, Tile
+from offcraft.ui.widgets import Badge, Card, ElidedLabel, Tile, ComboPolisher
 
 MANIFEST_URL = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json"
 
@@ -1055,6 +1064,8 @@ class MainWindow(QMainWindow):
             self.content_pages[key] = content
             self.dl_stack.addWidget(content)
         self.dl_stack.addWidget(self._build_java_tab())
+        self.install_page = InstallPage(self)
+        self.dl_stack.addWidget(self.install_page)
         right_column.addWidget(self.dl_stack, 1)
         layout.addWidget(right, 1)
 
@@ -2018,6 +2029,34 @@ class MainWindow(QMainWindow):
             self.install_game(summary)
 
     def install_game(self, summary: VersionSummary) -> None:
+        """点「安装」→ 进入安装页（不再是弹窗）。"""
+        if self.manifest is None:
+            self.notice("版本清单尚未就绪，请稍后再试", "WARN")
+            return
+        if self.cancel_event is not None and not self.cancel_event.is_set():
+            self.notice("已有任务在进行，请等待完成或取消", "WARN")
+            return
+        self.show_install_page(summary)
+
+    def show_install_page(self, summary: VersionSummary) -> None:
+        """把下载页右侧切到安装页，并填入版本信息与加载器行。"""
+        if self.stack.currentWidget() is not self.pages["download"]:
+            self.show_page("download")
+        self.install_page.open_for(summary)
+        self.dl_stack.setCurrentWidget(self.install_page)
+        self.tab_buttons["game"].setChecked(True)
+
+    def close_install_page(self) -> None:
+        self.switch_tab("game")
+
+    def start_install(
+        self,
+        summary: VersionSummary,
+        loader_key: str = "vanilla",
+        loader_version: str = "",
+        dir_name: str = "",
+    ) -> None:
+        """安装页点「安装」后的后台任务：原版 / 原版 + 加载器，最后可选改名。"""
         manifest = self.manifest
         if manifest is None:
             self.notice("版本清单尚未就绪，请稍后再试", "WARN")
@@ -2026,11 +2065,8 @@ class MainWindow(QMainWindow):
             self.notice("已有任务在进行，请等待完成或取消", "WARN")
             return
 
-        dialog = LoaderPickDialog(self, summary.id, title=f"安装 {summary.id}")
-        if not dialog.exec():
-            return
-        loader_key, loader_version = dialog.choice()
         loader_label = dict(LOADERS).get(loader_key, loader_key)
+        wanted = safe_instance_id(dir_name)
         title = f"安装 {summary.id}"
         if loader_key != "vanilla":
             title = f"安装 {summary.id} + {loader_label}"
@@ -2068,13 +2104,23 @@ class MainWindow(QMainWindow):
                     cancel=cancel,
                     phase=self.set_phase,
                 )
+            note = ""
+            if wanted and wanted != version_id:
+                version_id, note = rename_instance(self.game_dir(), version_id, wanted)
+                if note:
+                    self.post_log("WARN", note)
             self.config.last_version = version_id
             save_config(self.config, self.data_dir)
-            if version_id != summary.id:
-                return f"{version_id} 安装完成（{files} 个文件 + {loader_label} {loader_version}）"
-            return f"{summary.id} 安装完成，共 {files} 个文件"
+            suffix = f"（{note}）" if note else ""
+            if loader_key != "vanilla":
+                return (
+                    f"{version_id} 安装完成"
+                    f"（{files} 个文件 + {loader_label} {loader_version}）{suffix}"
+                )
+            return f"{version_id} 安装完成，共 {files} 个文件{suffix}"
 
         self.run_task(title, worker)
+        self.switch_tab("game")
 
     def _install_loader_on(self, instance: Instance) -> None:
         """给已有实例补装加载器，装上后就能装模组与光影。"""
@@ -2136,12 +2182,18 @@ class MainWindow(QMainWindow):
         self,
         hit: ProjectHit,
         version: ProjectVersion,
-        dest: Path,
-        instance: Instance,
+        target: Target,
         kind: str,
     ) -> None:
-        game_version = instance.mc_version
-        loader = instance.loader.lower() if instance.loader in ("Fabric", "Forge", "NeoForge", "Quilt") else ""
+        """把内容装到目标（版本实例或手选文件夹）的对应子目录。"""
+        game_version = target.mc_version
+        loader = (
+            target.loader.lower()
+            if target.loader in ("Fabric", "Forge", "NeoForge", "Quilt")
+            else ""
+        )
+        dest = target.subdir(kind)
+        label = target.label
 
         def worker(cancel: threading.Event) -> str:
             client = self.content_client()
@@ -2159,7 +2211,7 @@ class MainWindow(QMainWindow):
                 raise RuntimeError("没有下载到任何文件")
             names = "、".join(path.name for path in result.files[:3])
             more = f" 等 {len(result.files)} 个文件" if len(result.files) > 3 else ""
-            return f"已安装到 {instance.id}/{dest.name}：{names}{more}"
+            return f"已安装到 {label}/{dest.name}：{names}{more}"
 
         self.run_task(f"安装 {hit.title}", worker)
 
@@ -2719,6 +2771,9 @@ def run_app(config: Config, data_dir: str | Path | None = None) -> None:
     app.setApplicationDisplayName(APP_NAME)
     app.setStyle("Fusion")
     app.setStyleSheet(app_qss())
+    # 下拉框弹出层是独立的顶层窗口，只能靠全局事件过滤器去掉系统黑边
+    app._combo_polisher = ComboPolisher(app)  # noqa: SLF001 - 保引用防回收
+    app.installEventFilter(app._combo_polisher)
     window = MainWindow(config, data_dir)
     window.show()
     app.exec()
