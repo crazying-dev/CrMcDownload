@@ -11,8 +11,9 @@
 | M6 | 部署到生产服务器并切换域名实测 | 已完成 |
 | M7 | 内容生态：Modrinth 搜索/安装、`fabricmaven`/`modrinth`/`modcdn` 路由、整合包安装 | 已完成 |
 | M8 | 加载器：安装时选原版/ Fabric/ NeoForge/ Forge，已有实例可补装；模组/光影只能装到带加载器的实例 | 已完成 |
+| M9 | PyInstaller 打包、CI、发布（`v0.5.0` Release） | 已完成 |
+| M11 | 下载源择优：镜像 vs 直连时延探测（`SourceRouter`） | 已完成 |
 | M10 | 插件市场（API 尚未接入，目前只有页面框架） | 待开始 |
-| M9 | PyInstaller 打包、CI、发布 | 进行中 |
 
 ## 验收基线
 
@@ -29,7 +30,7 @@
 
 | 仓库 | 命令 | 数量 |
 | --- | --- | --- |
-| `user` | `python -m unittest discover -s tests` | 86 |
+| `user` | `python -m unittest discover -s tests` | 99 |
 | `user-downloader` | 同上 | 73 |
 | `user-launcher` | 同上 | 55 |
 | `server-mirror` / `server` | 同上 | 17 |

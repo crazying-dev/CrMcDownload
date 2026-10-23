@@ -41,6 +41,32 @@ maven 路由下 `*.xml`（`maven-metadata.xml`）按元数据缓存（TTL 600s�
 未识别主机直接报错，绝不回落到直连。唯一的例外是**内容层**（模组 / 整合包 / 资源包 / 光影）：
 当镜像缺少新路由或返回非 2xx 时会主动回落到 Modrinth 官方 API，以免自建镜像未升级时功能不可用。
 
+## 下载源选择（镜像 vs 直连）
+
+0.5.0 起，镜像不再是唯一出口：每次取文件前先比较「镜像中转」和「上游直连」的时延，择快者使用。
+
+```
+SourceRouter（offcraft/net/latency.py）
+  decide(key, mirror_url, direct_url)
+    ├─ 探测：新建连接 + `Range: bytes=0-2047`，量首字节时间（2 个样本取最快，单次 5s 超时，首次失败即放弃）
+    ├─ 主机无镜像映射（UnknownUpstreamError）→ 直连
+    ├─ 两者都不可达 → 直连
+    ├─ 只剩一方可达 → 用可达的一方
+    └─ 都可达 → 谁快用谁
+  决策按 key（route:meta / route:forgemaven / route:modcdn / modrinth-api …）缓存 600s
+```
+
+| 场景 | 行为 |
+| --- | --- |
+| 设置 `prefer_fastest = true`（默认） | 探测并择优，决策缓存 10 分钟 |
+| 设置 `prefer_fastest = false` | 恒走镜像（旧行为） |
+| 设置页「测试连接」 | 清空缓存并重新探测，输出每个路由的时延结论 |
+| CLI | `--no-fastest` 关闭择优 |
+
+`SourceRouter` 与 `Mirror` 接口兼容（`base_url` / `rewrite` / `rewrite_optional` / `is_mirror_url`），
+因此内容层、安装管线、加载器安装与 Java 运行时都无需改动；Modrinth 的多个候选域名则用 `rank()`
+按实测时延排序后取第一个。
+
 ## 安装管线
 
 ```

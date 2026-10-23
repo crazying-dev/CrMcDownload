@@ -47,12 +47,24 @@
 装版本时可选择加载器（原版 / Fabric / Forge / NeoForge）：原版只能装资源包，模组与光影只能装到带加载器的实例。
 内容下载默认走镜像（`/modrinth`、`/modcdn`），镜像不可用时自动回落到 Modrinth 官方源，徽章显示当前通道。
 
+### 下载源择优（0.5.0）
+
+镜像与上游直连两条路都在时，不再固定走镜像：取文件前先探测两边时延
+（新建连接 + `Range: bytes=0-2047` 的首字节时间，2 个样本取最快），择快者使用，决策缓存 10 分钟。
+
+- 设置页开关「下载时比较镜像与直连的延迟，自动用更快的一边」（`config.json` 的 `prefer_fastest`，默认开）；
+- 关闭后回到恒走镜像的旧行为；命令行可用 `--no-fastest`；
+- 设置页「测试连接」会清空缓存并重新探测，逐条列出 `镜像 578ms / 直连 641ms → 镜像` 这样的结论；
+- 自建镜像被限速而官源直连更快时自动改走直连，反之当官源被阻断时仍由镜像中转照顾。
+
 ```bash
 cd user
 python main.py                     # 需要 PyQt6
 # 或打包
 pyinstaller CrMCDownload.spec --noconfirm --clean   # dist/CrMCDownload/CrMCDownload.exe
 ```
+
+当前版本：`0.5.0`（`user`、`user-*` 分支）。
 
 配置默认在 `%APPDATA%\CrMCDownload\config.json`。
 
