@@ -93,8 +93,9 @@ cd user
 python main.py                     # 需要 PyQt6
 # 或打包
 pyinstaller CrMCDownload.spec --noconfirm --clean   # dist/CrMCDownload/CrMCDownload.exe
-powershell -NoProfile -ExecutionPolicy Bypass -File packaging\build_installer.ps1   # 再打安装包（需 Inno Setup 6）
-# 安装包：dist/installer/CrMCDownload-<版本>-win64-setup.exe（发布者 Cr，可直接覆盖旧版）
+powershell -NoProfile -ExecutionPolicy Bypass -File packaging\build_installer.ps1   # 再打安装包（自带 csc，无需 Inno/NSIS）
+# 安装包：dist/installer/CrMCDownload-<版本>-win64-setup.exe（发布者 Cr，可直接覆盖旧版；
+#         负载以 zip 资源内嵌，解包不经过 %TEMP%）
 ```
 
 当前版本：`0.5.3`（`user`、`user-*` 分支）。
