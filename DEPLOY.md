@@ -80,6 +80,30 @@ curl -I https://mc.yjlt.top/meta/mc/game/version_manifest_v2.json
 CrMCDownload.exe --base https://mc.yjlt.top --token <token> install 1.14
 ```
 
+## 5.1 内容路由（模组 / 整合包 / 资源包 / 光影 / 加载器）
+
+镜像支持以下新前缀，客户端内容下载优先走它们，镜像不可用时才回落到官方源：
+
+| 前缀 | 上游 | 备注 |
+| --- | --- | --- |
+| `/fabricmaven/` | `maven.fabricmc.net` | Fabric loader 的 jar 依赖 |
+| `/forgemaven/` | `maven.minecraftforge.net` | Forge 版本索引（`maven-metadata.xml`）与安装器依赖 |
+| `/neoforgemaven/` | `maven.neoforged.net` | NeoForge 版本索引与 jar |
+| `/modrinth/` | `api.modrinth.com` | 搜索 / 项目 / 版本，保留查询串 |
+| `/modcdn/` | `cdn.modrinth.com` | `.jar` / `.mrpack` / 图标 |
+
+Forge / NeoForge 的**安装器自身**会直连各自 maven 拉依赖，这部分不经过镜像（客户端只能保证版本索引走镜像）。
+
+部署后自检：
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' "https://mc.yjlt.top/modrinth/v2/search?query=sodium&limit=1"   # 200
+curl -s -o /dev/null -w '%{http_code}\n' "https://mc.yjlt.top/modrinth/v2/search?query=sodium&limit=1"   # 二次请求应为 200 且 /metrics 上游计数不变
+curl -s -o /dev/null -w '%{http_code}\n' "https://mc.yjlt.top/forgemaven/net/minecraftforge/forge/maven-metadata.xml"  # 200
+```
+
+如需改写上游（例如换镜像加速），在 `.env` 里补 `UPSTREAM_FABRICMAVEN` / `UPSTREAM_FORGEMAVEN` / `UPSTREAM_NEOFORGEMAVEN` / `UPSTREAM_MODRINTH` / `UPSTREAM_MODCDN`。
+
 ## 备选：无子域名（独立端口）
 
 若暂时不能加 DNS，可让 Caddy 监听 `:8443` 并自签/使用已有证书：
