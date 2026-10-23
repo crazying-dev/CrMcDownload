@@ -96,6 +96,8 @@ pyinstaller CrMCDownload.spec --noconfirm --clean   # dist/CrMCDownload/CrMCDown
 powershell -NoProfile -ExecutionPolicy Bypass -File packaging\build_installer.ps1   # 再打安装包（自带 csc，无需 Inno/NSIS）
 # 安装包：dist/installer/CrMCDownload-<版本>-win64-setup.exe（发布者 Cr，可直接覆盖旧版；
 #         负载以 zip 资源内嵌，解包不经过 %TEMP%）
+#         注意：双击前先把安装包复制到下载文件夹——从 E:\root\WorkSpaces\ 这类受限目录
+#         启动的进程写不了 C 盘，安装器会直接弹框说明而不是静默失败
 ```
 
 当前版本：`0.5.3`（`user`、`user-*` 分支）。
