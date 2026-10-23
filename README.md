@@ -97,18 +97,27 @@ python ../devtools/ui_shots.py .testbed/shots    # 输出界面截图
 pyinstaller CrMCDownload.spec --noconfirm --clean
 # 产物：dist/CrMCDownload/CrMCDownload.exe（文件夹分发）
 
-powershell -NoProfile -ExecutionPolicy Bypass -File packaging\build_installer.ps1   # 再打安装包（需 Inno Setup 6）
+powershell -NoProfile -ExecutionPolicy Bypass -File packaging\build_installer.ps1   # 再打安装包
 # 产物：dist/installer/CrMCDownload-<版本>-win64-setup.exe
 ```
 
 安装包口径（自 0.5.3 起）：
 
-- Inno Setup 6，脚本 [`packaging/CrMCDownload.iss`](packaging/CrMCDownload.iss)，版本号从
-  `offcraft/__init__.py` 自动读，编译前校验 exe 的文件版本与脚本一致；
-- 发布者统一为 **Cr**（`AppPublisher` / `VersionInfoCompany` / `UninstallDisplayName`）；
-- 安装包本体带四段式文件信息（`FileVersion` / `ProductVersion` / `ProductName` / `CompanyName` / `Description` / `Copyright`）；
-- 覆盖升级：`AppId` 固定 + 默认目录固定 `%LOCALAPPDATA%\Programs\CrMCDownload` + 文件 `ignoreversion`，
-  新版安装包直接盖在旧版上即可，无需先卸载；旧版正在运行时由 Restart Manager 先关掉。
+- 安装器是**自包含的 C# 程序**，源码 [`packaging/installer/Setup.cs`](packaging/installer/Setup.cs)，
+  用 Windows 自带的 .NET Framework 编译器 `csc.exe` 编译，不需要 Inno Setup / NSIS / WiX；
+- 应用负载以 zip 资源（`payload.zip`）内嵌在安装器中，**直接解包到目标目录**，
+  全程不往 `%TEMP%` 写任何东西（规避「安装器无法创建 %TEMP%\is-XXXX.tmp，Error 5」一类环境问题）；
+- 发布者统一为 **Cr**（`AssemblyCompany` / 回收站「应用和功能」`Publisher`）；
+- 安装包本体带四段式文件信息（`FileVersion` / `ProductVersion` / `ProductName` / `CompanyName` / `Copyright`）；
+- 覆盖升级：默认目录固定 `%LOCALAPPDATA%\Programs\CrMCDownload`，重跑新版安装包直接覆盖即可，
+  无需先卸载；旧版正在运行时会先尝试关窗口，关不掉则提示用户手动退出；
+- 卸载：安装目录内 `uninstall.exe`（由同一份源码以 `/define:UNINSTALLER` 编译，约 30 KB），
+  同时登记 `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\CrMCDownload`，
+  在「应用和功能」里可见（发布者 Cr、版本号、图标、卸载命令）；
+- 静默安装：`setup.exe /S [/DIR=<目录>] [/NODESKTOPICON] [/NOLAUNCH]`，卸载：`setup.exe /UNINSTALL /S`。
+
+> 注意：布局/临时目录相关的环境故障会让**任何**安装器失败，排查时可先用
+> `setup.exe /S /DIR=<某个目录>` 快速区分「安装器问题」与「系统权限问题」。
 
 ## 配置
 

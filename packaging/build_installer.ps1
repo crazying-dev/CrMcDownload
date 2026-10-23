@@ -1,60 +1,127 @@
-﻿# 打包 Windows 安装包（Inno Setup 6）。
+# Build the CrMCDownload Windows installer.
 #
-# 用法：
-#   powershell -NoProfile -ExecutionPolicy Bypass -File packaging\build_installer.ps1
-#   powershell ... -Version 0.5.4        # 手动指定版本
+# The setup is a self-contained C# executable compiled with the .NET Framework
+# compiler that ships with Windows (csc.exe) - no Inno Setup / NSIS / WiX needed.
+# The application payload is embedded as a managed resource and unpacked
+# straight into the target directory, so the setup never extracts anything into
+# %TEMP%.
 #
-# 前置：先跑 pyinstaller CrMCDownload.spec（产物 dist\CrMCDownload）；
-#       本机需安装 Inno Setup 6（默认 C:\Program Files (x86)\Inno Setup 6\ISCC.exe）。
+# Two binaries are produced from packaging\installer\Setup.cs:
+#   uninstaller.exe  compiled with /define:UNINSTALLER (no payload, ~30 KB)
+#   setup.exe        embeds payload.zip + uninstaller.exe as resources
+#
+# Usage:  powershell -ExecutionPolicy Bypass -File packaging\build_installer.ps1
+#
+# Requires dist\CrMCDownload\CrMCDownload.exe (pyinstaller CrMCDownload.spec).
 param(
-    [string]$Version = '',
-    [string]$Iscc = '',
-    [string]$Payload = '',
-    [switch]$SkipPayloadCheck
+    [string]$Dist = ''
 )
+
 $ErrorActionPreference = 'Stop'
 
-$root = Split-Path -Parent $PSScriptRoot
-$iss = Join-Path $PSScriptRoot 'CrMCDownload.iss'
+$here = $PSScriptRoot
+$root = Split-Path -Parent $here
 
-if (-not $Version) {
-    $init = Get-Content (Join-Path $root 'offcraft\__init__.py') -Encoding UTF8 -Raw
-    $m = [regex]::Match($init, '__version__\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"')
-    if (-not $m.Success) { throw '无法从 offcraft/__init__.py 读取版本号' }
-    $Version = $m.Groups[1].Value
+function Get-AppVersion {
+    $initPy = Join-Path $root 'offcraft\__init__.py'
+    $text = [System.IO.File]::ReadAllText($initPy)
+    $m = [regex]::Match($text, '__version__\s*=\s*"([0-9A-Za-z\.\-]+)"')
+    if (-not $m.Success) { throw "cannot read __version__ from $initPy" }
+    return $m.Groups[1].Value
 }
 
-if (-not $Iscc) {
-    $candidates = @(
-        'C:\Program Files (x86)\Inno Setup 6\ISCC.exe',
-        'C:\Program Files\Inno Setup 6\ISCC.exe'
-    )
-    $Iscc = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
-    if (-not $Iscc) { throw '未找到 ISCC.exe（请安装 Inno Setup 6）' }
+$Version = Get-AppVersion
+$p = $Version.Split('.')
+while ($p.Length -lt 4) { $p += '0' }
+$Version4 = ($p[0..3] -join '.')
+
+if ($Dist -eq '') { $Dist = Join-Path $root 'dist\CrMCDownload' }
+$distExe = Join-Path $Dist 'CrMCDownload.exe'
+if (-not (Test-Path $distExe)) {
+    throw "missing $distExe - build it first with: pyinstaller CrMCDownload.spec --noconfirm --clean"
+}
+$distVer = (Get-Item $distExe).VersionInfo.FileVersion
+if ($distVer -ne $Version) {
+    throw "version mismatch: app exe is $distVer but offcraft.__version__ is $Version (rebuild the exe)"
 }
 
-if (-not $Payload) { $Payload = Join-Path $root 'dist\CrMCDownload' }
-$exe = Join-Path $Payload 'CrMCDownload.exe'
-if (-not $SkipPayloadCheck) {
-    if (-not (Test-Path $exe)) {
-        throw ('未找到 {0}，先执行：cd user; pyinstaller CrMCDownload.spec --noconfirm --clean' -f $exe)
+$csc = 'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+if (-not (Test-Path $csc)) { throw "csc.exe not found at $csc (.NET Framework 4.x is required)" }
+
+$icon = Join-Path $root 'assets\icon.ico'
+$manifest = Join-Path $here 'installer\app.manifest'
+$setupSrc = Join-Path $here 'installer\Setup.cs'
+$buildDir = Join-Path $root 'build\installer'
+New-Item -ItemType Directory -Force -Path $buildDir | Out-Null
+$payload = Join-Path $buildDir 'payload.zip'
+
+Write-Host "[1/4] packing payload from $Dist"
+& python (Join-Path $here 'make_payload.py') $Dist $payload
+if ($LASTEXITCODE -ne 0) { throw 'payload build failed' }
+
+Write-Host "[2/4] generating version metadata ($Version4)"
+$bi = @"
+using System.Reflection;
+[assembly: AssemblyTitle("CrMCDownload Setup")]
+[assembly: AssemblyDescription("CrMCDownload Setup")]
+[assembly: AssemblyCompany("Cr")]
+[assembly: AssemblyProduct("CrMCDownload")]
+[assembly: AssemblyCopyright("Copyright (C) 2026 Cr")]
+[assembly: AssemblyVersion("$Version4")]
+[assembly: AssemblyFileVersion("$Version4")]
+namespace CrMcSetup
+{
+    internal static class BuildInfo
+    {
+        public const string Name = "CrMCDownload";
+        public const string Publisher = "Cr";
+        public const string Version = "$Version";
     }
-    $fv = (Get-Item $exe).VersionInfo.FileVersion
-    if ($fv -ne $Version) {
-        throw ('exe 版本是 {0}，与脚本版本 {1} 不一致，请先重新打包' -f $fv, $Version)
-    }
 }
+"@
+$biPath = Join-Path $buildDir 'BuildInfo.cs'
+$utf8Bom = New-Object System.Text.UTF8Encoding($true)
+[System.IO.File]::WriteAllText($biPath, $bi, $utf8Bom)
 
+$cscCommon = @(
+    '/nologo', '/target:winexe', '/platform:anycpu', '/optimize+', '/codepage:65001',
+    ('/win32icon:' + $icon),
+    ('/win32manifest:' + $manifest),
+    '/r:System.dll', '/r:System.Core.dll', '/r:System.Drawing.dll',
+    '/r:System.Windows.Forms.dll', '/r:System.IO.Compression.dll',
+    '/r:System.IO.Compression.FileSystem.dll'
+)
+
+Write-Host '[3/4] compiling uninstaller.exe'
+$unExe = Join-Path $buildDir 'uninstaller.exe'
+& $csc ($cscCommon + @('/define:UNINSTALLER', ('/out:' + $unExe), $setupSrc, $biPath))
+if ($LASTEXITCODE -ne 0) { throw "csc (uninstaller) failed with exit code $LASTEXITCODE" }
+
+Write-Host '[4/4] compiling setup.exe'
 $outDir = Join-Path $root 'dist\installer'
-if (-not (Test-Path $outDir)) { New-Item -ItemType Directory -Path $outDir | Out-Null }
+New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+$outExe = Join-Path $outDir ("CrMCDownload-$Version-win64-setup.exe")
+& $csc ($cscCommon + @(
+    ('/out:' + $outExe),
+    ('/resource:' + $payload + ',payload.zip'),
+    ('/resource:' + $unExe + ',uninstaller.exe'),
+    $setupSrc,
+    $biPath
+))
+if ($LASTEXITCODE -ne 0) { throw "csc (setup) failed with exit code $LASTEXITCODE" }
+if (-not (Test-Path $outExe)) { throw 'csc reported success but no output file' }
 
-Write-Host ('== 编译安装包：版本 {0}，payload {1} ==' -f $Version, $Payload)
-& $Iscc ('/DMyAppVersion=' + $Version) ('/DPayloadDir=' + $Payload) $iss
-if ($LASTEXITCODE -ne 0) { throw ('ISCC 失败，退出码 {0}' -f $LASTEXITCODE) }
+$info = (Get-Item $outExe).VersionInfo
+$hash = (Get-FileHash $outExe -Algorithm SHA256).Hash.ToLower()
+$size = (Get-Item $outExe).Length
 
-$setup = Join-Path $outDir ('CrMCDownload-{0}-win64-setup.exe' -f $Version)
-if (-not (Test-Path $setup)) { throw ('未生成 {0}' -f $setup) }
-$item = Get-Item $setup
-$vi = $item.VersionInfo
-Write-Host ('== 完成：{0}' -f $setup) -ForegroundColor Green
-Write-Host ('   size={0:N0} bytes  FileVersion={1}  ProductVersion={2}  Company={3}' -f $item.Length, $vi.FileVersion, $vi.ProductVersion, $vi.CompanyName)
+Write-Host ''
+Write-Host 'installer ready:'
+Write-Host ("  file    : " + $outExe)
+Write-Host ("  size    : " + $size + " bytes")
+Write-Host ("  sha256  : " + $hash)
+Write-Host ("  FileVer : " + $info.FileVersion)
+Write-Host ("  ProdVer : " + $info.ProductVersion)
+Write-Host ("  Company : " + $info.CompanyName)
+Write-Host ("  Payload : " + (Get-Item $payload).Length + " bytes (embedded as payload.zip)")
+Write-Host ("  Uninst  : " + (Get-Item $unExe).Length + " bytes (embedded as uninstaller.exe)")
