@@ -3,8 +3,9 @@
 界面参考 PCL2：左侧导航 + 卡片式内容区，右侧是可操作的主体。
 
 - 「启动游戏」：账户、当前实例概览、内存滑杆、启动按钮、版本列表与快捷入口。
-- 「下载中心」：游戏版本 + Modrinth 的模组 / 整合包 / 资源包 / 光影。
-- 「设置」：游戏目录、版本隔离、Java、内存、下载源。
+- 「下载中心」：游戏版本 + Modrinth 的模组 / 整合包 / 资源包 / 光影 + Java 运行时。
+- 「插件」：插件市场 / 官方 / 社区 / 其他 / 已下载（仅框架，接口未接入）。
+- 「设置」：游戏目录、版本隔离、Java、内存；下载源只读，按 F12 才可修改。
 
 所有网络请求都在后台线程执行，结果通过 ``self.events`` 回到界面线程，
 因此搜索、安装、下载过程中窗口不会卡死。
@@ -41,7 +42,6 @@ from PyQt6.QtWidgets import (
     QMainWindow,
     QMenu,
     QMessageBox,
-    QPlainTextEdit,
     QProgressBar,
     QPushButton,
     QScrollArea,
@@ -57,6 +57,18 @@ from PyQt6.QtWidgets import (
 from offcraft import APP_NAME, __version__
 from offcraft.config import Config, config_dir, save_config
 from offcraft.content.install import download_file, install_project_version, safe_filename
+from offcraft.content.java import (
+    JavaRuntime,
+    install_java_runtime,
+    list_java_runtimes,
+)
+from offcraft.content.loader import (
+    LOADERS,
+    LoaderBuild,
+    install_loader,
+    list_loader_versions,
+    supports_mods,
+)
 from offcraft.content.modpack import unique_instance_name
 from offcraft.content.modrinth import ModrinthClient, ProjectHit, ProjectVersion
 from offcraft.instances import (
@@ -93,6 +105,18 @@ CONTENT_TABS = [
     ("modpack", "整合包"),
     ("resourcepack", "资源包"),
     ("shader", "光影"),
+]
+
+#: 下载中心全部页签（游戏版本 + 内容 + Java）
+DOWNLOAD_TABS = [("game", "游戏版本")] + CONTENT_TABS + [("java", "Java")]
+
+#: 插件页分区（仅框架）
+PLUGIN_TABS = [
+    ("market", "市场"),
+    ("official", "官方"),
+    ("community", "社区"),
+    ("other", "其他"),
+    ("downloaded", "已下载"),
 ]
 
 #: 游戏版本分类
@@ -223,56 +247,138 @@ class AccountDialog(QDialog):
         return self.edit.text().strip()
 
 
-class LogDialog(QDialog):
-    """运行日志：可按级别过滤并复制。"""
+class LoaderPickDialog(QDialog):
+    """选择加载器与版本（安装游戏或给已有版本补装加载器时使用）。"""
 
-    LEVELS = [("全部", ""), ("信息", "INFO"), ("警告", "WARN"), ("错误", "ERROR")]
+    def __init__(
+        self,
+        window: "MainWindow",
+        mc_version: str,
+        *,
+        allow_vanilla: bool = True,
+        loader: str = "vanilla",
+        title: str = "选择加载器",
+    ) -> None:
+        super().__init__(window)
+        self.window = window
+        self.mc_version = mc_version
+        self._builds: list[LoaderBuild] = []
+        self._token = 0
+        self.setWindowTitle(title)
+        self.setMinimumWidth(430)
 
-    def __init__(self, parent: QWidget, records: list[tuple[str, str, str]]) -> None:
-        super().__init__(parent)
-        self.records = records
-        self.setWindowTitle("运行日志")
-        self.resize(760, 460)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(18, 16, 18, 14)
+        layout.setContentsMargins(20, 18, 20, 16)
         layout.setSpacing(10)
-        row = QHBoxLayout()
-        self.filter = QComboBox()
-        for label, value in self.LEVELS:
-            self.filter.addItem(label, value)
-        self.filter.currentIndexChanged.connect(self._render)
-        row.addWidget(self.filter)
-        self.count = QLabel("")
-        self.count.setObjectName("muted")
-        row.addWidget(self.count)
-        row.addStretch(1)
-        copy = QPushButton("复制全部")
-        copy.clicked.connect(self._copy)
-        row.addWidget(copy)
-        layout.addLayout(row)
-        self.text = QPlainTextEdit()
-        self.text.setReadOnly(True)
-        layout.addWidget(self.text, 1)
-        close = QPushButton("关闭")
-        close.clicked.connect(self.accept)
-        close_row = QHBoxLayout()
-        close_row.addStretch(1)
-        close_row.addWidget(close)
-        layout.addLayout(close_row)
-        self._render()
+        heading = QLabel(f"Minecraft {mc_version}")
+        heading.setObjectName("h2")
+        layout.addWidget(heading)
+        layout.addWidget(QLabel("加载器决定能不能装模组与光影：原版只能装资源包。"))
 
-    def _visible(self) -> list[tuple[str, str, str]]:
-        level = self.filter.currentData()
-        return [item for item in self.records if not level or item[1] == level]
+        self.loader_combo = QComboBox()
+        for key, text in LOADERS:
+            if key == "vanilla" and not allow_vanilla:
+                continue
+            self.loader_combo.addItem(text, key)
+        index = self.loader_combo.findData(loader)
+        self.loader_combo.setCurrentIndex(index if index >= 0 else 0)
+        self.loader_combo.currentIndexChanged.connect(self._load_versions)
+        layout.addWidget(self.loader_combo)
 
-    def _render(self) -> None:
-        items = self._visible()
-        self.text.setPlainText("\n".join(f"[{stamp}] [{level}] {text}" for stamp, level, text in items))
-        self.count.setText(f"{len(items)} 条")
-        self.text.verticalScrollBar().setValue(self.text.verticalScrollBar().maximum())
+        self.version_combo = QComboBox()
+        layout.addWidget(self.version_combo)
 
-    def _copy(self) -> None:
-        QApplication.clipboard().setText(self.text.toPlainText())
+        self.info = QLabel("")
+        self.info.setObjectName("muted")
+        self.info.setWordWrap(True)
+        layout.addWidget(self.info)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        cancel = QPushButton("取消")
+        cancel.clicked.connect(self.reject)
+        buttons.addWidget(cancel)
+        self.ok_button = QPushButton("安装" if allow_vanilla else "添加加载器")
+        self.ok_button.setObjectName("accent")
+        self.ok_button.clicked.connect(self._accept)
+        buttons.addWidget(self.ok_button)
+        layout.addLayout(buttons)
+
+        self._load_versions()
+
+    def _load_versions(self) -> None:
+        key = str(self.loader_combo.currentData() or "vanilla")
+        self._token += 1
+        token = self._token
+        self.version_combo.blockSignals(True)
+        self.version_combo.clear()
+        if key == "vanilla":
+            self.version_combo.addItem("不安装加载器（原版）", "")
+            self.version_combo.setEnabled(False)
+            self.version_combo.blockSignals(False)
+            self.info.setText("原版实例不能安装模组与光影，资源包不受影响。")
+            return
+        self.version_combo.setEnabled(False)
+        self.version_combo.addItem("正在读取可用版本……", "")
+        self.version_combo.blockSignals(False)
+        self.info.setText("正在从镜像读取版本列表……")
+
+        mirror = Mirror(self.window.config.download_base or "https://mc.yjlt.top")
+        downloader = self.window.make_downloader(progress=False, workers=3)
+
+        def worker() -> None:
+            try:
+                builds = list_loader_versions(
+                    key, self.mc_version, mirror=mirror, downloader=downloader, limit=40
+                )
+            except Exception as exc:  # noqa: BLE001 - 展示给用户
+                self.window.post(lambda: self._failed(token, str(exc)))
+                return
+            self.window.post(lambda: self._loaded(token, builds))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _loaded(self, token: int, builds: list[LoaderBuild]) -> None:
+        if token != self._token:
+            return
+        self._builds = list(builds)
+        self.version_combo.blockSignals(True)
+        self.version_combo.clear()
+        if not builds:
+            self.version_combo.addItem("没有可用版本", "")
+            self.version_combo.setEnabled(False)
+            self.info.setText("该加载器没有适配这个 MC 版本，换一个加载器试试。")
+        else:
+            for build in builds:
+                self.version_combo.addItem(build.label, build.version)
+            self.version_combo.setEnabled(True)
+            self.info.setText(
+                f"共 {len(builds)} 个版本，默认最新；Forge / NeoForge 需要本机已安装 Java。"
+            )
+        self.version_combo.blockSignals(False)
+
+    def _failed(self, token: int, message: str) -> None:
+        if token != self._token:
+            return
+        self.version_combo.blockSignals(True)
+        self.version_combo.clear()
+        self.version_combo.addItem("获取失败", "")
+        self.version_combo.setEnabled(False)
+        self.version_combo.blockSignals(False)
+        self.info.setText(f"版本列表获取失败：{message}")
+
+    def _accept(self) -> None:
+        key = str(self.loader_combo.currentData() or "vanilla")
+        if key != "vanilla" and not str(self.version_combo.currentData() or ""):
+            QMessageBox.information(self, APP_NAME, "请先选择一个加载器版本。")
+            return
+        self.accept()
+
+    def choice(self) -> tuple[str, str]:
+        key = str(self.loader_combo.currentData() or "vanilla")
+        if key == "vanilla":
+            return "vanilla", ""
+        return key, str(self.version_combo.currentData() or ""),
 
 
 class InstanceDialog(QDialog):
@@ -473,6 +579,7 @@ class MainWindow(QMainWindow):
         self.pages: dict[str, QWidget] = {
             "home": self._build_home_page(),
             "download": self._build_download_page(),
+            "plugins": self._build_plugins_page(),
             "settings": self._build_settings_page(),
         }
         for page in self.pages.values():
@@ -510,7 +617,12 @@ class MainWindow(QMainWindow):
         self.nav_buttons: dict[str, QPushButton] = {}
         group = QButtonGroup(self)
         group.setExclusive(True)
-        for key, text in (("home", "启动游戏"), ("download", "下载中心"), ("settings", "设置")):
+        for key, text in (
+            ("home", "启动游戏"),
+            ("download", "下载中心"),
+            ("plugins", "插件"),
+            ("settings", "设置"),
+        ):
             button = QPushButton(text)
             button.setCheckable(True)
             button.setObjectName("nav")
@@ -537,16 +649,11 @@ class MainWindow(QMainWindow):
         self.account_button.clicked.connect(self._edit_account)
         layout.addWidget(self.account_button)
 
-        log_button = QPushButton("运行日志")
-        log_button.setObjectName("nav")
-        log_button.clicked.connect(self.open_log_dialog)
-        layout.addWidget(log_button)
-
-        source_button = QPushButton("下载源")
-        source_button.setObjectName("nav")
-        source_button.setToolTip("F12 也可以打开")
-        source_button.clicked.connect(self.open_source_dialog)
-        layout.addWidget(source_button)
+        self.source_label = self._label("")
+        self.source_label.setObjectName("mutedSmall")
+        self.source_label.setWordWrap(True)
+        self.source_label.setToolTip("下载源已由发布者固定，按 F12 可打开修改窗口")
+        layout.addWidget(self.source_label)
         return bar
 
     def _build_home_page(self) -> QWidget:
@@ -713,7 +820,7 @@ class MainWindow(QMainWindow):
         self.tab_buttons: dict[str, QPushButton] = {}
         group = QButtonGroup(self)
         group.setExclusive(True)
-        for key, text in [("game", "游戏版本")] + CONTENT_TABS:
+        for key, text in DOWNLOAD_TABS:
             button = QPushButton(text)
             button.setCheckable(True)
             button.setObjectName("segment")
@@ -732,6 +839,7 @@ class MainWindow(QMainWindow):
             content = ContentPage(self, key)
             self.content_pages[key] = content
             self.dl_stack.addWidget(content)
+        self.dl_stack.addWidget(self._build_java_tab())
         layout.addWidget(self.dl_stack, 1)
 
         self.tab_buttons["game"].setChecked(True)
@@ -820,6 +928,254 @@ class MainWindow(QMainWindow):
         layout.addWidget(body, 1)
         return page
 
+    def _build_plugins_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
+
+        header = QHBoxLayout()
+        head = QVBoxLayout()
+        head.setSpacing(2)
+        head.addWidget(self._label("插件", "h2"))
+        head.addWidget(self._label("启动器插件：市场 / 官方 / 社区 / 其他 / 已下载（接口未接入，先做框架）"))
+        header.addLayout(head, 1)
+        self.plugin_badge = Badge("框架", "gray")
+        header.addWidget(self.plugin_badge)
+        layout.addLayout(header)
+
+        tabs = QFrame()
+        tabs.setObjectName("softCard")
+        tabs_layout = QHBoxLayout(tabs)
+        tabs_layout.setContentsMargins(6, 6, 6, 6)
+        tabs_layout.setSpacing(4)
+        self.plugin_buttons: dict[str, QPushButton] = {}
+        group = QButtonGroup(self)
+        group.setExclusive(True)
+        for key, text in PLUGIN_TABS:
+            button = QPushButton(text)
+            button.setCheckable(True)
+            button.setObjectName("segment")
+            button.setMinimumHeight(30)
+            button.clicked.connect(lambda _c, name=key: self._switch_plugin(name))
+            group.addButton(button)
+            tabs_layout.addWidget(button)
+            self.plugin_buttons[key] = button
+        tabs_layout.addStretch(1)
+        self.plugin_buttons["market"].setChecked(True)
+        layout.addWidget(tabs)
+
+        empty = Card(margins=(28, 28, 28, 22))
+        icon_row = QHBoxLayout()
+        icon_row.addStretch(1)
+        icon = QLabel()
+        icon.setFixedSize(72, 72)
+        icon.setPixmap(block_pixmap("plugins", 72))
+        icon_row.addWidget(icon)
+        icon_row.addStretch(1)
+        empty.add_layout(icon_row)
+        self.plugin_title = QLabel("插件市场")
+        self.plugin_title.setObjectName("h2")
+        self.plugin_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        empty.add(self.plugin_title)
+        self.plugin_desc = QLabel("")
+        self.plugin_desc.setObjectName("muted")
+        self.plugin_desc.setWordWrap(True)
+        self.plugin_desc.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        empty.add(self.plugin_desc)
+        empty.body.addStretch(1)
+        tiles = QGridLayout()
+        tiles.setSpacing(10)
+        entries = [
+            ("浏览插件", "连接插件源（待接入）"),
+            ("导入本地插件", "从 .zip / .py 安装（待接入）"),
+            ("插件目录", "打开插件存放目录"),
+        ]
+        for index, (title, hint) in enumerate(entries):
+            tiles.addWidget(Tile(title, hint, lambda _c=False, t=title: self._plugin_stub(t)), 0, index)
+        empty.add_layout(tiles)
+        layout.addWidget(empty, 1)
+        self._switch_plugin("market")
+        return page
+
+    PLUGIN_DESCS = {
+        "market": "插件市场：后续可对接插件索引，目前仅保留页面框架与导航。",
+        "official": "官方插件：随启动器发布的插件列表将在这里展示。",
+        "community": "社区插件：来自社区仓库的插件将在这里展示。",
+        "other": "其他插件：手动导入或第三方来源的插件。",
+        "downloaded": "已下载插件：本地已安装的插件与启用状态。",
+    }
+
+    def _switch_plugin(self, key: str) -> None:
+        for name, button in self.plugin_buttons.items():
+            button.setChecked(name == key)
+        for name, text in PLUGIN_TABS:
+            if name == key:
+                self.plugin_title.setText(text)
+                break
+        self.plugin_desc.setText(self.PLUGIN_DESCS.get(key, ""))
+
+    def _plugin_stub(self, title: str) -> None:
+        self.notice(f"{title}：插件接口尚未接入，本节只做框架", "WARN")
+
+    def _build_java_tab(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
+
+        banner = QFrame()
+        banner.setObjectName("softCard")
+        banner_layout = QHBoxLayout(banner)
+        banner_layout.setContentsMargins(16, 12, 16, 12)
+        banner_layout.setSpacing(12)
+        icon = QLabel()
+        icon.setFixedSize(44, 44)
+        icon.setPixmap(block_pixmap("java", 44))
+        banner_layout.addWidget(icon)
+        text = QVBoxLayout()
+        text.setSpacing(1)
+        title = QLabel("Java 运行时")
+        title.setObjectName("h3")
+        text.addWidget(title)
+        text.addWidget(
+            self._label("官方 Java 下载；启动游戏与运行 Forge / NeoForge 安装器都要用到")
+        )
+        banner_layout.addLayout(text, 1)
+        refresh = QPushButton("刷新列表")
+        refresh.clicked.connect(self._refresh_java_tab)
+        banner_layout.addWidget(refresh)
+        layout.addWidget(banner)
+
+        body = Card(margins=(12, 10, 12, 10))
+        self.java_tree = QTreeWidget()
+        self.java_tree.setHeaderLabels(["组件", "版本", "主版本", "状态"])
+        self.java_tree.setRootIsDecorated(False)
+        self.java_tree.setUniformRowHeights(True)
+        head = self.java_tree.header()
+        head.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        for column in (1, 2, 3):
+            head.setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
+        body.add(self.java_tree, 1)
+
+        footer = QHBoxLayout()
+        self.java_status = self._label("正在读取 Java 列表……")
+        footer.addWidget(self.java_status, 1)
+        self.java_set_button = QPushButton("设为启动 Java")
+        self.java_set_button.clicked.connect(self._set_selected_java)
+        footer.addWidget(self.java_set_button)
+        self.java_open_button = QPushButton("打开目录")
+        self.java_open_button.clicked.connect(self._open_java_dir)
+        footer.addWidget(self.java_open_button)
+        self.java_install_button = QPushButton("下载并安装")
+        self.java_install_button.setObjectName("accent")
+        self.java_install_button.clicked.connect(self._install_selected_java)
+        footer.addWidget(self.java_install_button)
+        body.add_layout(footer)
+        layout.addWidget(body, 1)
+
+        self.java_runtimes: list[JavaRuntime] = []
+        self._java_loading = False
+        return page
+
+    def _refresh_java_tab(self) -> None:
+        if getattr(self, "_java_loading", False):
+            return
+        self._java_loading = True
+        self.java_status.setText("正在读取 Java 列表……")
+        mirror = Mirror(self.config.download_base or "https://mc.yjlt.top")
+        downloader = self.make_downloader(progress=False, workers=2)
+
+        def worker() -> None:
+            try:
+                runtimes = list_java_runtimes(mirror, downloader)
+            except Exception as exc:  # noqa: BLE001 - 展示给用户
+                self.post(lambda: self._java_failed(str(exc)))
+                return
+            self.post(lambda: self._apply_java_runtimes(runtimes))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _java_failed(self, message: str) -> None:
+        self._java_loading = False
+        self.java_status.setText(f"获取失败：{message}")
+
+    def _apply_java_runtimes(self, runtimes: list[JavaRuntime]) -> None:
+        self._java_loading = False
+        self.java_runtimes = list(runtimes)
+        mc_dir = self.game_dir()
+        self.java_tree.clear()
+        installed = 0
+        for runtime in runtimes:
+            done = runtime.installed(mc_dir)
+            installed += int(done)
+            node = QTreeWidgetItem(
+                [
+                    runtime.component,
+                    runtime.version or "-",
+                    f"Java {runtime.major}" if runtime.major else "-",
+                    "已安装" if done else "未安装",
+                ]
+            )
+            node.setData(0, Qt.ItemDataRole.UserRole, runtime)
+            node.setIcon(0, QIcon(block_pixmap(runtime.component, 22, "java")))
+            self.java_tree.addTopLevelItem(node)
+        if self.java_tree.topLevelItemCount():
+            self.java_tree.setCurrentItem(self.java_tree.topLevelItem(0))
+        self.java_status.setText(
+            f"共 {len(runtimes)} 个运行时，已安装 {installed} 个（存于 {mc_dir / 'runtime'}）"
+        )
+
+    def _selected_java_runtime(self) -> JavaRuntime | None:
+        node = getattr(self, "java_tree", None)
+        if node is None:
+            return None
+        current = node.currentItem()
+        return current.data(0, Qt.ItemDataRole.UserRole) if current is not None else None
+
+    def _install_selected_java(self) -> None:
+        runtime = self._selected_java_runtime()
+        if runtime is None:
+            self.notice("请先选择一个 Java 运行时", "WARN")
+            return
+        mc_dir = self.game_dir()
+        mirror = Mirror(self.config.download_base or "https://mc.yjlt.top")
+
+        def worker(cancel: threading.Event) -> str:
+            downloader = self.make_downloader()
+            path = install_java_runtime(
+                mc_dir,
+                runtime,
+                mirror=mirror,
+                downloader=downloader,
+                cancel=cancel,
+                phase=self.set_phase,
+            )
+            return f"Java 已安装：{path}"
+
+        self.run_task(
+            f"下载 {runtime.component}",
+            worker,
+            on_done=lambda: (self._refresh_java_tab(), self._refresh_java_combo()),
+        )
+
+    def _set_selected_java(self) -> None:
+        runtime = self._selected_java_runtime()
+        if runtime is None:
+            self.notice("请先选择一个 Java 运行时", "WARN")
+            return
+        path = runtime.java_path(self.game_dir())
+        if not path.is_file():
+            self.notice("先下载这个运行时，再设为启动 Java", "WARN")
+            return
+        self.config.java_overrides["__global__"] = str(path)
+        save_config(self.config, self.data_dir)
+        self._refresh_java_combo()
+        self.notice(f"启动 Java 已设为 {runtime.component}")
+
+    def _open_java_dir(self) -> None:
+        _reveal(self.game_dir() / "runtime")
+
     def _build_settings_page(self) -> QWidget:
         page = QWidget()
         outer = QVBoxLayout(page)
@@ -894,16 +1250,22 @@ class MainWindow(QMainWindow):
 
         source = Card()
         source.add(self._label("下载源", "h2"))
-        source.add(self._label("客户端只与下载源通信，游戏文件 / Fabric / Modrinth 都经它代理"))
+        source.add(self._label("客户端只与下载源通信，游戏文件 / Fabric / Forge / Modrinth 都经它代理"))
         self.settings_base = QLineEdit(self.config.download_base)
+        self.settings_base.setReadOnly(True)
+        self.settings_base.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         source.add(self.settings_base)
         pair = QHBoxLayout()
         pair.setSpacing(8)
         self.settings_token = QLineEdit(self.config.download_token)
         self.settings_token.setPlaceholderText("访问令牌（可选）")
+        self.settings_token.setReadOnly(True)
+        self.settings_token.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         pair.addWidget(self.settings_token, 1)
         self.settings_proxy = QLineEdit(self.config.proxy)
         self.settings_proxy.setPlaceholderText("代理（可选，如 http://127.0.0.1:7890）")
+        self.settings_proxy.setReadOnly(True)
+        self.settings_proxy.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         pair.addWidget(self.settings_proxy, 1)
         source.add_layout(pair)
         workers_row = QHBoxLayout()
@@ -912,12 +1274,19 @@ class MainWindow(QMainWindow):
         self.settings_workers = QSpinBox()
         self.settings_workers.setRange(1, 32)
         self.settings_workers.setValue(int(self.config.max_workers))
+        self.settings_workers.setEnabled(False)
         workers_row.addWidget(self.settings_workers)
         workers_row.addStretch(1)
         test = QPushButton("测试连接")
         test.clicked.connect(self._test_source)
         workers_row.addWidget(test)
+        change = QPushButton("修改下载源（F12）")
+        change.clicked.connect(self.open_source_dialog)
+        workers_row.addWidget(change)
         source.add_layout(workers_row)
+        hint = self._label("下载源已由发布者固定，按 F12 打开修改窗口", "mutedSmall")
+        hint.setWordWrap(True)
+        source.add(hint)
         self.settings_source_state = self._label("")
         source.add(self.settings_source_state)
         layout.addWidget(source)
@@ -931,9 +1300,6 @@ class MainWindow(QMainWindow):
         open_data = QPushButton("打开数据目录")
         open_data.clicked.connect(self._open_data_dir)
         about_row.addWidget(open_data)
-        open_log = QPushButton("运行日志")
-        open_log.clicked.connect(self.open_log_dialog)
-        about_row.addWidget(open_log)
         source_dialog = QPushButton("下载源设置（F12）")
         source_dialog.clicked.connect(self.open_source_dialog)
         about_row.addWidget(source_dialog)
@@ -1018,7 +1384,7 @@ class MainWindow(QMainWindow):
         self.switch_tab(key)
 
     def switch_tab(self, key: str) -> None:
-        order = ["game"] + [name for name, _text in CONTENT_TABS]
+        order = [name for name, _text in DOWNLOAD_TABS]
         if key not in order:
             key = "game"
         self._current_tab = key
@@ -1027,6 +1393,9 @@ class MainWindow(QMainWindow):
             button.setChecked(name == key)
         if key == "game":
             self._render_versions()
+            return
+        if key == "java":
+            self._refresh_java_tab()
             return
         page = self.content_pages.get(key)
         if page is None:
@@ -1042,9 +1411,13 @@ class MainWindow(QMainWindow):
             host = base.split("//", 1)[-1].split("/")[0]
             self.source_badge.set(f"镜像 · {host}", "green")
             self.download_sub.setToolTip(f"游戏与内容均通过 {base} 下载")
+            if hasattr(self, "source_label"):
+                self.source_label.setText(f"下载源：{host}")
         else:
             self.source_badge.set("官方源", "gray")
             self.download_sub.setToolTip("未配置下载源，将直连官方地址")
+            if hasattr(self, "source_label"):
+                self.source_label.setText("下载源：官方")
 
     # ------------------------------------------------------------- 实例
     def game_dir(self) -> Path:
@@ -1133,6 +1506,8 @@ class MainWindow(QMainWindow):
         pack = read_pack_metadata(self.game_dir(), instance.id)
         if pack and pack.get("name"):
             parts.insert(0, f"整合包 {pack.get('name')}")
+        if not supports_mods(instance.loader):
+            parts.append("原版 · 不能装模组（右键可安装加载器）")
         if instance.broken:
             parts.append("版本 JSON 损坏")
         self.hero_meta.setText("  ·  ".join(parts))
@@ -1159,6 +1534,7 @@ class MainWindow(QMainWindow):
         launch = menu.addAction("启动游戏")
         menu.addSeparator()
         settings = menu.addAction("版本设置")
+        add_loader = menu.addAction("安装加载器…")
         menu.addSeparator()
         open_game = menu.addAction("打开游戏目录")
         open_version = menu.addAction("打开版本目录")
@@ -1169,6 +1545,8 @@ class MainWindow(QMainWindow):
             self.launch_game(instance)
         elif chosen is settings:
             self._open_instance_dialog()
+        elif chosen is add_loader:
+            self._install_loader_on(instance)
         elif chosen is open_game:
             _reveal(self.game_dir_for(instance))
         elif chosen is open_version:
@@ -1341,6 +1719,18 @@ class MainWindow(QMainWindow):
         if manifest is None:
             self.notice("版本清单尚未就绪，请稍后再试", "WARN")
             return
+        if self.cancel_event is not None and not self.cancel_event.is_set():
+            self.notice("已有任务在进行，请等待完成或取消", "WARN")
+            return
+
+        dialog = LoaderPickDialog(self, summary.id, title=f"安装 {summary.id}")
+        if not dialog.exec():
+            return
+        loader_key, loader_version = dialog.choice()
+        loader_label = dict(LOADERS).get(loader_key, loader_key)
+        title = f"安装 {summary.id}"
+        if loader_key != "vanilla":
+            title = f"安装 {summary.id} + {loader_label}"
 
         def worker(cancel: threading.Event) -> str:
             from offcraft.install.installer import install, prepare_install
@@ -1359,11 +1749,70 @@ class MainWindow(QMainWindow):
             if not result.ok:
                 first = result.report.failed[0] if result.report.failed else (None, "未知错误")
                 raise RuntimeError(f"{len(result.report.failed)} 个文件失败：{first[1]}")
-            self.config.last_version = summary.id
+            files = len(result.report.succeeded)
+            version_id = summary.id
+            if loader_key != "vanilla":
+                self.set_phase(f"安装 {loader_label} {loader_version}")
+                version_id = install_loader(
+                    self.game_dir(),
+                    summary.id,
+                    loader_key,
+                    loader_version,
+                    mirror=mirror,
+                    downloader=downloader,
+                    manifest=manifest,
+                    java=self.config.java_overrides.get("__global__"),
+                    cancel=cancel,
+                    phase=self.set_phase,
+                )
+            self.config.last_version = version_id
             save_config(self.config, self.data_dir)
-            return f"{summary.id} 安装完成，共 {len(result.report.succeeded)} 个文件"
+            if version_id != summary.id:
+                return f"{version_id} 安装完成（{files} 个文件 + {loader_label} {loader_version}）"
+            return f"{summary.id} 安装完成，共 {files} 个文件"
 
-        self.run_task(f"安装 {summary.id}", worker)
+        self.run_task(title, worker)
+
+    def _install_loader_on(self, instance: Instance) -> None:
+        """给已有实例补装加载器，装上后就能装模组与光影。"""
+        if self.process is not None and self.process.running:
+            self.notice("游戏正在运行，请先关闭游戏", "WARN")
+            return
+        dialog = LoaderPickDialog(
+            self,
+            instance.mc_version,
+            allow_vanilla=False,
+            title=f"给 {instance.id} 添加加载器",
+        )
+        if not dialog.exec():
+            return
+        key, version = dialog.choice()
+        if key == "vanilla" or not version:
+            return
+        label = dict(LOADERS).get(key, key)
+
+        def worker(cancel: threading.Event) -> str:
+            downloader = self.make_downloader()
+            mirror = Mirror(self.config.download_base or "https://mc.yjlt.top")
+            manifest = self.ensure_manifest(cancel)
+            self.set_phase(f"安装 {label} {version}")
+            version_id = install_loader(
+                self.game_dir(),
+                instance.mc_version,
+                key,
+                version,
+                mirror=mirror,
+                downloader=downloader,
+                manifest=manifest,
+                java=self.config.java_overrides.get("__global__"),
+                cancel=cancel,
+                phase=self.set_phase,
+            )
+            self.config.last_version = version_id
+            save_config(self.config, self.data_dir)
+            return f"{version_id} 已就绪，可以安装模组了"
+
+        self.run_task(f"安装 {label} {version}", worker)
 
     # ------------------------------------------------------------- 内容下载
     def content_client(self) -> ModrinthClient:
@@ -1738,9 +2187,6 @@ class MainWindow(QMainWindow):
         dialog = InstanceDialog(self, self.selected)
         dialog.exec()
 
-    def open_log_dialog(self) -> None:
-        LogDialog(self, list(self.log_records)).exec()
-
     def open_source_dialog(self) -> None:
         dialog = SourceDialog(self, self.config)
         if not dialog.exec():
@@ -1748,6 +2194,7 @@ class MainWindow(QMainWindow):
         dialog.apply()
         save_config(self.config, self.data_dir)
         self._refresh_source_badge()
+        self._load_settings_values()
         self.manifest = None
         self._content_client = None
         self.post_log("INFO", f"下载源已更新：{self.config.download_base}")
@@ -1777,12 +2224,6 @@ class MainWindow(QMainWindow):
         self.config.skip_assets = self.settings_skip_assets.isChecked()
         self.config.memory_mb = int(self.settings_memory.value())
         self.config.extra_jvm = [part for part in self.settings_jvm.text().split(" ") if part]
-        self.config.download_base = (
-            self.settings_base.text().strip().rstrip("/") or "https://mc.yjlt.top"
-        )
-        self.config.download_token = self.settings_token.text().strip()
-        self.config.proxy = self.settings_proxy.text().strip()
-        self.config.max_workers = int(self.settings_workers.value())
         save_config(self.config, self.data_dir)
 
         self.home_memory.blockSignals(True)

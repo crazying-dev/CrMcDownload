@@ -38,6 +38,9 @@ HOST_ROUTES: dict[str, str] = {
     "resources.download.minecraft.net": "assets",
     "meta.fabricmc.net": "fabric",
     "maven.fabricmc.net": "fabricmaven",
+    # Forge / NeoForge maven（安装器与 maven-metadata.xml）
+    "maven.minecraftforge.net": "forgemaven",
+    "maven.neoforged.net": "neoforgemaven",
     # Modrinth API / 文件 CDN（搜索依赖查询串，镜像服务原样转发）
     "api.modrinth.com": "modrinth",
     "cdn.modrinth.com": "modcdn",

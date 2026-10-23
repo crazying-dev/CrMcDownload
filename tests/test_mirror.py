@@ -48,6 +48,21 @@ class MirrorTest(unittest.TestCase):
             self.mirror.rewrite(url), "https://mc.example.com/fabric/v2/versions/loader/1.21.1"
         )
 
+    def test_rewrite_forge_maven(self) -> None:
+        url = "https://maven.minecraftforge.net/net/minecraftforge/forge/maven-metadata.xml"
+        self.assertEqual(
+            self.mirror.rewrite(url),
+            "https://mc.example.com/forgemaven/net/minecraftforge/forge/maven-metadata.xml",
+        )
+
+    def test_rewrite_neoforge_maven(self) -> None:
+        url = "https://maven.neoforged.net/releases/net/neoforged/neoforge/maven-metadata.xml"
+        self.assertEqual(
+            self.mirror.rewrite(url),
+            "https://mc.example.com/neoforgemaven/releases/net/neoforged/neoforge/"
+            "maven-metadata.xml",
+        )
+
     def test_unknown_host_rejected(self) -> None:
         with self.assertRaises(UnknownUpstreamError):
             self.mirror.rewrite("https://example.org/file.jar")
@@ -70,6 +85,8 @@ class MirrorTest(unittest.TestCase):
                 "maven.fabricmc.net",
                 "api.modrinth.com",
                 "cdn.modrinth.com",
+                "maven.minecraftforge.net",
+                "maven.neoforged.net",
             },
         )
 

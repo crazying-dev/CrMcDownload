@@ -21,6 +21,7 @@ from PyQt6.QtWidgets import (
 )
 
 from offcraft.content.install import CONTENT_DIRS
+from offcraft.content.loader import supports_mods
 from offcraft.content.modrinth import ContentError, ProjectHit, ProjectVersion
 from offcraft.ui.theme import MUTED, human_count, initial_pixmap
 from offcraft.ui.widgets import Badge, Card, ContentRow, ElidedLabel
@@ -178,6 +179,7 @@ class ContentPage(QWidget):
         else:
             detail.add(self._label("安装到", "muted"))
             self.instance_combo = QComboBox()
+            self.instance_combo.currentIndexChanged.connect(self._on_instance_changed)
             detail.add(self.instance_combo)
 
         self.install_button = QPushButton("安装所选版本")
@@ -252,12 +254,13 @@ class ContentPage(QWidget):
             self.instance_combo.blockSignals(True)
             self.instance_combo.clear()
             for item in instances:
-                self.instance_combo.addItem(f"{item.id}（{item.loader}）", item)
+                self.instance_combo.addItem(self._instance_text(item), item)
             if selected is not None:
                 target = self.instance_combo.findData(selected)
                 if target >= 0:
                     self.instance_combo.setCurrentIndex(target)
             self.instance_combo.blockSignals(False)
+            self._refresh_install_state()
 
         try:
             self.mode_badge.setText(f"Modrinth · {self.window.content_client().api_mode}")
@@ -429,9 +432,45 @@ class ContentPage(QWidget):
         if index < 0:
             return
         version = self.version_combo.itemData(index)
-        self.install_button.setEnabled(version is not None)
         if version is not None and self.kind == "modpack":
             self.name_edit.setText(f"{self.selected.title} {version.label}" if self.selected else "")
+        self._refresh_install_state()
+
+    def _on_instance_changed(self, _index: int) -> None:
+        self._refresh_install_state()
+
+    @staticmethod
+    def _instance_text(item) -> str:
+        if supports_mods(item.loader):
+            return f"{item.id}（{item.loader}）"
+        return f"{item.id}（原版·不支持模组）"
+
+    def _refresh_install_state(self) -> None:
+        """安装按钮：要有版本，且模组 / 光影只能装到带加载器的实例。"""
+        if not hasattr(self, "install_button"):
+            return
+        version = self._version()
+        if version is None:
+            self.install_button.setEnabled(False)
+            return
+        if self.kind == "modpack":
+            self.install_button.setEnabled(True)
+            return
+        instance = self.instance_combo.currentData()
+        if instance is None:
+            self.install_button.setEnabled(False)
+            self.detail_hint.setText("先安装一个游戏版本，才能安装内容。")
+            return
+        if self.kind in ("mod", "shader") and not supports_mods(instance.loader):
+            self.install_button.setEnabled(False)
+            what = "模组" if self.kind == "mod" else "光影"
+            self.detail_hint.setText(
+                f"{instance.id} 是原版实例，不能装{what}。"
+                "请在「启动」页右键该版本 → 安装加载器…"
+                "（Fabric / Forge / NeoForge），或换个实例。"
+            )
+            return
+        self.install_button.setEnabled(True)
 
     def _open_page(self) -> None:
         if self.selected is not None:
@@ -452,6 +491,13 @@ class ContentPage(QWidget):
         instance = self.instance_combo.currentData()
         if instance is None:
             self.window.notice("请先安装一个游戏版本，再安装内容", "WARN")
+            return
+        if self.kind in ("mod", "shader") and not supports_mods(instance.loader):
+            self.window.notice(
+                f"{instance.id} 是原版实例，不能安装模组 / 光影。"
+                "请在「启动」页右键该版本 → 安装加载器…（Fabric / Forge / NeoForge）",
+                "WARN",
+            )
             return
         dest = self.window.game_dir_for(instance) / CONTENT_DIRS[self.kind]
         self.window.install_content(hit, version, dest, instance, self.kind)
