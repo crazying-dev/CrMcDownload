@@ -138,6 +138,8 @@ LEFT_W = u(20)
 RIGHT_W = u(55)
 #: 单侧内边距
 SIDE_PAD = u(1.5)
+#: 启动页头像边长（比草图小一些，避免占去左栏一半高度）
+AVATAR_PX = 128
 
 #: 下载中心全部页签（游戏版本 + 内容 + Java）
 DOWNLOAD_TABS = [("game", "游戏版本")] + CONTENT_TABS + [("java", "Java")]
@@ -580,6 +582,7 @@ class MainWindow(QMainWindow):
         self._build()
         QShortcut(QKeySequence("F12"), self, activated=self.open_source_dialog)
         self._refresh_source_badge()
+        self._refresh_java_combo()
         self._load_cached_manifest()
         self.refresh_instances()
         self.refresh_remote()
@@ -676,14 +679,15 @@ class MainWindow(QMainWindow):
         status_row = QHBoxLayout(status)
         status_row.setContentsMargins(0, 0, 0, 0)
         status_row.setSpacing(u(0.375))
-        status_row.addStretch(1)
         self.status_dot = QLabel("●")
         self.status_dot.setStyleSheet(f"color: {OK}; font-size: 11pt;")
         status_row.addWidget(self.status_dot)
         self.status_label = ElidedLabel("就绪")
         self.status_label.setObjectName("status")
-        self.status_label.setFixedWidth(u(11))
-        status_row.addWidget(self.status_label)
+        self.status_label.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        status_row.addWidget(self.status_label, 1)
         layout.addWidget(status)
         return bar
 
@@ -697,43 +701,62 @@ class MainWindow(QMainWindow):
         left = QWidget()
         left.setFixedWidth(LEFT_W)
         column = QVBoxLayout(left)
-        column.setContentsMargins(SIDE_PAD, u(5), SIDE_PAD, u(2))
+        column.setContentsMargins(SIDE_PAD, u(1), SIDE_PAD, u(2))
         column.setSpacing(0)
 
+        panel = Card(margins=(u(1.25), u(1.25), u(1.25), u(1.25)))
+
         self.avatar = QLabel()
-        self.avatar.setFixedSize(u(15), u(15))
-        self.avatar.setPixmap(initial_pixmap(self.config.username, u(15), "account"))
+        self.avatar.setFixedSize(AVATAR_PX, AVATAR_PX)
+        self.avatar.setPixmap(initial_pixmap(self.config.username, AVATAR_PX, "account"))
         avatar_row = QHBoxLayout()
         avatar_row.setContentsMargins(0, 0, 0, 0)
         avatar_row.addStretch(1)
         avatar_row.addWidget(self.avatar)
         avatar_row.addStretch(1)
-        column.addLayout(avatar_row)
+        panel.add_layout(avatar_row)
 
-        column.addSpacing(u(3))
+        caption = self._label("离线账户", "mutedSmall")
+        caption.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        panel.add(caption)
+
         self.account_name = QLineEdit(self.config.username)
         self.account_name.setObjectName("heroName")
-        self.account_name.setFixedHeight(u(4))
+        self.account_name.setFixedHeight(u(2.5))
         self.account_name.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.account_name.setMaxLength(16)
         self.account_name.setToolTip("离线账户名：点击即可修改，回车生效")
         self.account_name.editingFinished.connect(self._apply_account_name)
-        column.addWidget(self.account_name)
+        panel.add(self.account_name)
 
-        column.addSpacing(u(3))
-        self.launch_button = QPushButton("启动游戏")
-        self.launch_button.setObjectName("accentBig")
-        self.launch_button.setFixedHeight(u(5))
-        self.launch_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.launch_button.clicked.connect(self._launch_or_stop)
-        column.addWidget(self.launch_button)
-
-        column.addSpacing(u(1))
+        panel.body.addStretch(1)
         self.home_hint = self._label("", "muted")
         self.home_hint.setWordWrap(True)
         self.home_hint.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        column.addWidget(self.home_hint)
-        column.addStretch(1)
+        panel.add(self.home_hint)
+
+        panel.body.addSpacing(u(0.75))
+        self.launch_button = QPushButton("启动游戏")
+        self.launch_button.setObjectName("accentBig")
+        self.launch_button.setFixedHeight(u(3.5))
+        self.launch_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.launch_button.clicked.connect(self._launch_or_stop)
+        panel.add(self.launch_button)
+
+        panel.body.addSpacing(u(0.75))
+        actions = QHBoxLayout()
+        actions.setSpacing(u(0.75))
+        instance_button = QPushButton("版本设置")
+        instance_button.setFixedHeight(u(2.25))
+        instance_button.clicked.connect(self._open_instance_dialog)
+        actions.addWidget(instance_button, 1)
+        open_button = QPushButton("打开目录")
+        open_button.setFixedHeight(u(2.25))
+        open_button.clicked.connect(self._open_game_dir)
+        actions.addWidget(open_button, 1)
+        panel.add_layout(actions)
+
+        column.addWidget(panel)
         layout.addWidget(left)
 
         right = QWidget()
@@ -768,7 +791,7 @@ class MainWindow(QMainWindow):
         row.addWidget(self.version_combo)
 
         self.instance_menu_button = QPushButton("⋯")
-        self.instance_menu_button.setObjectName("segment")
+        self.instance_menu_button.setObjectName("heroMenu")
         self.instance_menu_button.setFixedSize(u(2.5), u(3.5))
         self.instance_menu_button.setToolTip("版本设置 / 安装加载器 / 打开目录 / 删除实例")
         self.instance_menu_button.clicked.connect(
@@ -874,8 +897,35 @@ class MainWindow(QMainWindow):
         detect.clicked.connect(self._refresh_java_combo)
         java_row.addWidget(detect)
         card.add_layout(java_row)
+
+        jvm_row = QHBoxLayout()
+        jvm_row.setSpacing(u(0.75))
+        jvm_row.addWidget(self._label("参数"))
+        self.home_jvm = QLineEdit(" ".join(self.config.extra_jvm))
+        self.home_jvm.setPlaceholderText("额外 JVM 参数，例如 -XX:+UseG1GC")
+        self.home_jvm.editingFinished.connect(self._apply_home_jvm)
+        jvm_row.addWidget(self.home_jvm, 1)
+        card.add_layout(jvm_row)
         card.body.addStretch(1)
+
+        more_row = QHBoxLayout()
+        more_row.setSpacing(u(0.75))
+        note = self._label("参数与 Java 会随启动命令一起生效", "mutedSmall")
+        more_row.addWidget(note)
+        more_row.addStretch(1)
+        more = QPushButton("更多设置")
+        more.setFixedHeight(u(2))
+        more.clicked.connect(lambda: self.show_page("settings"))
+        more_row.addWidget(more)
+        card.add_layout(more_row)
         return card
+
+    def _apply_home_jvm(self) -> None:
+        """启动页的 JVM 参数：回车即保存，并同步设置页。"""
+        self.config.extra_jvm = [part for part in self.home_jvm.text().split(" ") if part]
+        save_config(self.config, self.data_dir)
+        if hasattr(self, "settings_jvm"):
+            self.settings_jvm.setText(" ".join(self.config.extra_jvm))
 
     def _home_content_dir(self, name: str) -> Path:
         instance = self.selected
@@ -959,7 +1009,7 @@ class MainWindow(QMainWindow):
         left = QWidget()
         left.setFixedWidth(LEFT_W)
         column = QVBoxLayout(left)
-        column.setContentsMargins(SIDE_PAD, u(5), SIDE_PAD, u(2))
+        column.setContentsMargins(SIDE_PAD, u(1), SIDE_PAD, u(2))
         column.setSpacing(u(0.5))
         column.addWidget(self._label("下载", "title"))
         self.download_sub = self._label("游戏版本、模组、整合包、资源包与光影，全部经由自建镜像加速")
@@ -1102,7 +1152,7 @@ class MainWindow(QMainWindow):
         left = QWidget()
         left.setFixedWidth(LEFT_W)
         column = QVBoxLayout(left)
-        column.setContentsMargins(SIDE_PAD, u(5), SIDE_PAD, u(2))
+        column.setContentsMargins(SIDE_PAD, u(1), SIDE_PAD, u(2))
         column.setSpacing(u(0.5))
         column.addWidget(self._label("插件", "title"))
         intro = self._label("启动器插件：市场 / 官方 / 社区 / 其他 / 已下载（接口未接入，先做框架）")
@@ -1360,7 +1410,7 @@ class MainWindow(QMainWindow):
         left = QWidget()
         left.setFixedWidth(LEFT_W)
         side = QVBoxLayout(left)
-        side.setContentsMargins(SIDE_PAD, u(5), SIDE_PAD, u(2))
+        side.setContentsMargins(SIDE_PAD, u(1), SIDE_PAD, u(2))
         side.setSpacing(u(0.75))
         side.addWidget(self._label("设置", "title"))
         intro = self._label(
@@ -1371,7 +1421,7 @@ class MainWindow(QMainWindow):
         side.addSpacing(u(1.5))
         save_button = QPushButton("保存设置")
         save_button.setObjectName("accent")
-        save_button.setFixedHeight(u(2.75))
+        save_button.setFixedHeight(u(2.5))
         save_button.setCursor(Qt.CursorShape.PointingHandCursor)
         save_button.clicked.connect(self.save_settings)
         side.addWidget(save_button)
@@ -1739,11 +1789,10 @@ class MainWindow(QMainWindow):
             self.launch_button.setEnabled(False)
             self._refresh_home_lists()
             return
-        parts = [
-            f"MC {instance.mc_version}",
-            instance.loader or "原版",
-            human_size(instance.size_bytes),
-        ]
+        parts = [f"MC {instance.mc_version}", human_size(instance.size_bytes)]
+        loader = instance.loader or "原版"
+        if loader not in ("原版", "未知"):
+            parts.insert(1, loader)
         pack = read_pack_metadata(self.game_dir(), instance.id)
         if pack and pack.get("name"):
             parts.insert(0, f"整合包 {pack.get('name')}")
@@ -2459,6 +2508,8 @@ class MainWindow(QMainWindow):
         self.settings_memory.blockSignals(False)
         self.settings_memory_value.setText(f"{self.config.memory_mb} MB")
         self.settings_jvm.setText(" ".join(self.config.extra_jvm))
+        if hasattr(self, "home_jvm"):
+            self.home_jvm.setText(" ".join(self.config.extra_jvm))
         self.settings_base.setText(self.config.download_base)
         self.settings_token.setText(self.config.download_token)
         self.settings_proxy.setText(self.config.proxy)
@@ -2477,6 +2528,8 @@ class MainWindow(QMainWindow):
         self.home_memory.setValue(int(self.config.memory_mb))
         self.home_memory.blockSignals(False)
         self.memory_value.setText(f"{self.config.memory_mb} MB")
+        self.home_jvm.setText(" ".join(self.config.extra_jvm))
+        self._refresh_java_combo()
 
         self.manifest = None
         self._content_client = None
