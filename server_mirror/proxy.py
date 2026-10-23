@@ -11,7 +11,6 @@ import time
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import quote
 
 from server_mirror.cache import Cache, is_metadata
 from server_mirror.config import Settings
@@ -184,7 +183,7 @@ class MirrorHandler(BaseHTTPRequestHandler):
 
     # ------------------------------------------------------------- upstream
     def _proxy(self, route: Route, cache_path: Path, head_only: bool) -> None:
-        upstream_url = route.upstream_base + "/" + quote(route.relative, safe="/")
+        upstream_url = route.upstream_base + route.upstream_path
         headers = {"User-Agent": "OffCraft-Mirror/0.1", "Accept": "*/*"}
         range_header = self.headers.get("Range")
         if range_header:

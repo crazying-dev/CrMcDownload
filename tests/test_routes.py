@@ -8,6 +8,9 @@ UPSTREAMS = {
     "libs": "https://libraries.minecraft.net",
     "assets": "https://resources.download.minecraft.net",
     "fabric": "https://meta.fabricmc.net",
+    "fabricmaven": "https://maven.fabricmc.net",
+    "modrinth": "https://api.modrinth.com",
+    "modcdn": "https://cdn.modrinth.com",
 }
 
 
@@ -41,6 +44,40 @@ class RoutesTest(unittest.TestCase):
     def test_missing_upstream(self) -> None:
         with self.assertRaises(BadPath):
             resolve("/meta/x", {"meta": ""})
+
+    def test_query_is_preserved(self) -> None:
+        route = resolve(
+            "/modrinth/v2/search?query=sodium&limit=20&facets=%5B%22x%22%5D",
+            UPSTREAMS,
+        )
+        self.assertEqual(route.prefix, "modrinth")
+        self.assertEqual(route.relative, "v2/search")
+        self.assertEqual(route.upstream_base, "https://api.modrinth.com")
+        self.assertEqual(
+            route.upstream_path,
+            "/v2/search?query=sodium&limit=20&facets=%5B%22x%22%5D",
+        )
+
+    def test_query_changes_cache_key(self) -> None:
+        first = resolve("/modrinth/v2/search?query=sodium", UPSTREAMS)
+        second = resolve("/modrinth/v2/search?query=lithium", UPSTREAMS)
+        self.assertNotEqual(first.cache_key, second.cache_key)
+        self.assertTrue(first.cache_key.startswith("modrinth/v2/search.q"))
+        self.assertEqual(
+            resolve("/modrinth/v2/search", UPSTREAMS).cache_key, "modrinth/v2/search"
+        )
+
+    def test_modcdn_file(self) -> None:
+        route = resolve("/modcdn/data/abc/versions/1/file.jar", UPSTREAMS)
+        self.assertEqual(route.prefix, "modcdn")
+        self.assertEqual(route.cache_key, "modcdn/data/abc/versions/1/file.jar")
+        self.assertEqual(route.upstream_path, "/data/abc/versions/1/file.jar")
+
+    def test_rejects_bad_query(self) -> None:
+        with self.assertRaises(BadPath):
+            resolve("/modrinth/v2/search?query=a\nb", UPSTREAMS)
+        with self.assertRaises(BadPath):
+            resolve("/modrinth/v2/search?q=" + "a" * 3000, UPSTREAMS)
 
 
 if __name__ == "__main__":

@@ -43,6 +43,8 @@ class CacheTest(unittest.TestCase):
     def test_is_metadata(self) -> None:
         self.assertTrue(is_metadata("meta"))
         self.assertTrue(is_metadata("fabric"))
+        self.assertTrue(is_metadata("modrinth"))
+        self.assertFalse(is_metadata("modcdn"))
         self.assertFalse(is_metadata("libs"))
 
 
