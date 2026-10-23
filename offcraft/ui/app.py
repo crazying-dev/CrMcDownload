@@ -85,8 +85,8 @@ from offcraft.launch.java import list_java, probe_java
 from offcraft.launch.process import GameProcess
 from offcraft.meta.manifest import VersionManifest, VersionSummary
 from offcraft.meta.version import load_version
-from offcraft.mirror import Mirror
 from offcraft.net.downloader import Downloader, ProgressTracker
+from offcraft.net.latency import make_source
 from offcraft.ui.content_page import ContentPage
 from offcraft.ui.theme import (
     DANGER,
@@ -357,8 +357,8 @@ class LoaderPickDialog(QDialog):
         self.version_combo.blockSignals(False)
         self.info.setText("正在从镜像读取版本列表……")
 
-        mirror = Mirror(self.window.config.download_base or "https://mc.yjlt.top")
         downloader = self.window.make_downloader(progress=False, workers=3)
+        mirror = self.window.source(downloader)
 
         def worker() -> None:
             try:
@@ -560,6 +560,8 @@ class MainWindow(QMainWindow):
         self._content_client: ModrinthClient | None = None
         self._content_key: tuple[str, str, str] | None = None
         self._version_rows: list[VersionSummary] = []
+        #: 下载源缓存（按 base/proxy/择优开关 区分），保留探测结论避免重复测时
+        self._sources: dict[str, Any] = {}
 
         self.setWindowTitle(APP_NAME)
         self.setWindowIcon(QIcon(block_pixmap("crmcdownload", 64)))
@@ -1307,8 +1309,8 @@ class MainWindow(QMainWindow):
             return
         self._java_loading = True
         self.java_status.setText("正在读取 Java 列表……")
-        mirror = Mirror(self.config.download_base or "https://mc.yjlt.top")
         downloader = self.make_downloader(progress=False, workers=2)
+        mirror = self.source(downloader)
 
         def worker() -> None:
             try:
@@ -1363,14 +1365,13 @@ class MainWindow(QMainWindow):
             self.notice("请先选择一个 Java 运行时", "WARN")
             return
         mc_dir = self.game_dir()
-        mirror = Mirror(self.config.download_base or "https://mc.yjlt.top")
 
         def worker(cancel: threading.Event) -> str:
             downloader = self.make_downloader()
             path = install_java_runtime(
                 mc_dir,
                 runtime,
-                mirror=mirror,
+                mirror=self.source(downloader),
                 downloader=downloader,
                 cancel=cancel,
                 phase=self.set_phase,
@@ -1527,6 +1528,13 @@ class MainWindow(QMainWindow):
         self.settings_proxy.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         pair.addWidget(self.settings_proxy, 1)
         source.add_layout(pair)
+        self.settings_fastest = QCheckBox("下载时比较镜像与直连的延迟，自动用更快的一边")
+        self.settings_fastest.setChecked(bool(getattr(self.config, "prefer_fastest", True)))
+        self.settings_fastest.setToolTip(
+            "开启后，每一类资源下载前会先各测一次首字节耗时（只读 2 KB），\n"
+            "镜像更快就用镜像，直连更快就直连；结论 10 分钟内复用。"
+        )
+        source.add(self.settings_fastest)
         workers_row = QHBoxLayout()
         workers_row.setSpacing(8)
         workers_row.addWidget(self._label("并发下载数"))
@@ -2032,7 +2040,7 @@ class MainWindow(QMainWindow):
             from offcraft.install.plan import InstallOptions
 
             downloader = self.make_downloader()
-            mirror = Mirror(self.config.download_base)
+            mirror = self.source(downloader)
             options = InstallOptions(include_assets=not self.config.skip_assets)
             plan = prepare_install(
                 self.game_dir(), summary.id, manifest, mirror, downloader, options=options
@@ -2088,7 +2096,7 @@ class MainWindow(QMainWindow):
 
         def worker(cancel: threading.Event) -> str:
             downloader = self.make_downloader()
-            mirror = Mirror(self.config.download_base or "https://mc.yjlt.top")
+            mirror = self.source(downloader)
             manifest = self.ensure_manifest(cancel)
             self.set_phase(f"安装 {label} {version}")
             version_id = install_loader(
@@ -2114,7 +2122,12 @@ class MainWindow(QMainWindow):
         key = (self.config.download_base or "", self.config.proxy, self.config.download_token)
         if self._content_client is None or self._content_key != key:
             self._content_client = ModrinthClient(
-                self.config.download_base or "", downloader=self.make_downloader(workers=4)
+                self.config.download_base or "",
+                downloader=self.make_downloader(workers=4),
+                proxy=self.config.proxy,
+                token=self.config.download_token,
+                source=self.source(),
+                prefer_fastest=bool(getattr(self.config, "prefer_fastest", True)),
             )
             self._content_key = key
         return self._content_client
@@ -2174,7 +2187,7 @@ class MainWindow(QMainWindow):
             self.set_phase("校验整合包")
             target_name = unique_instance_name(self.game_dir(), name or hit.title)
             downloader = self.make_downloader()
-            mirror = Mirror(self.config.download_base or "https://mc.yjlt.top")
+            mirror = self.source(downloader)
             manifest = self.ensure_manifest(cancel)
             result = install_mrpack(
                 self.game_dir(),
@@ -2199,9 +2212,8 @@ class MainWindow(QMainWindow):
     def ensure_manifest(self, cancel: threading.Event | None = None) -> VersionManifest:
         if self.manifest is not None:
             return self.manifest
-        base = self.config.download_base or "https://mc.yjlt.top"
         downloader = self.make_downloader(progress=False, workers=2)
-        data = downloader.fetch_json(Mirror(base).rewrite(MANIFEST_URL))
+        data = downloader.fetch_json(self.source(downloader).rewrite(MANIFEST_URL))
         manifest = VersionManifest.from_json(data)
         self.manifest = manifest
         try:
@@ -2269,6 +2281,38 @@ class MainWindow(QMainWindow):
             ),
             progress_interval=0.25,
         )
+
+    def source(self, downloader: Downloader | None = None):
+        """当前下载源：在镜像与直连之间按实测时延择优。
+
+        返回对象与 :class:`offcraft.mirror.Mirror` 接口一致（``rewrite`` 等），
+        可直接传给安装计划、加载器安装等函数。探测结论按 10 分钟缓存，
+        因此同一个窗口内不会反复测时。
+        """
+        enabled = bool(getattr(self.config, "prefer_fastest", True))
+        key = f"{self.config.download_base}|{self.config.proxy}|{enabled}"
+        cached = self._sources.get(key)
+        if cached is None:
+            cached = make_source(
+                self.config.download_base,
+                downloader=downloader,
+                proxy=self.config.proxy,
+                token=self.config.download_token,
+                enabled=enabled,
+            )
+            self._sources[key] = cached
+        return cached
+
+    def source_summary(self) -> str:
+        """形如「镜像 libs 18ms / 直连 240ms → 镜像」的说明，供界面展示。"""
+        rows: list[str] = []
+        for source in self._sources.values():
+            summary = getattr(source, "summary", None)
+            if callable(summary):
+                text = summary()
+                if text and text != "尚未探测":
+                    rows.append(text)
+        return "；".join(rows)
 
     def request_icon(
         self, url: str, callback: Callable[[QPixmap], None], size: int = 46
@@ -2514,6 +2558,8 @@ class MainWindow(QMainWindow):
         self.settings_token.setText(self.config.download_token)
         self.settings_proxy.setText(self.config.proxy)
         self.settings_workers.setValue(int(self.config.max_workers))
+        if hasattr(self, "settings_fastest"):
+            self.settings_fastest.setChecked(bool(getattr(self.config, "prefer_fastest", True)))
         self._refresh_java_combo()
 
     def save_settings(self) -> None:
@@ -2522,6 +2568,8 @@ class MainWindow(QMainWindow):
         self.config.skip_assets = self.settings_skip_assets.isChecked()
         self.config.memory_mb = int(self.settings_memory.value())
         self.config.extra_jvm = [part for part in self.settings_jvm.text().split(" ") if part]
+        if hasattr(self, "settings_fastest"):
+            self.config.prefer_fastest = self.settings_fastest.isChecked()
         save_config(self.config, self.data_dir)
 
         self.home_memory.blockSignals(True)
@@ -2533,6 +2581,7 @@ class MainWindow(QMainWindow):
 
         self.manifest = None
         self._content_client = None
+        self._sources.clear()
         self._refresh_source_badge()
         self._load_cached_manifest()
         self.refresh_remote()
@@ -2622,9 +2671,28 @@ class MainWindow(QMainWindow):
             else:
                 version = data.get("version") if isinstance(data, dict) else ""
                 message = "连接正常" + (f" · 服务端 {version}" if version else "")
+                message += "\n" + self._latency_report(base)
             self.post(lambda: self.settings_source_state.setText(message))
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _latency_report(self, base: str) -> str:
+        """实测一次镜像/直连时延，并刷新择优结论（供「测试连接」展示）。"""
+        if not bool(getattr(self.config, "prefer_fastest", True)):
+            return "已关闭自动择优：固定走镜像"
+        self._sources.clear()
+        source = self.source()
+        for official in (
+            MANIFEST_URL,
+            "https://maven.minecraftforge.net/net/minecraftforge/forge/maven-metadata.xml",
+        ):
+            try:
+                source.rewrite(official)  # 触发一次探测并写入缓存
+            except Exception:  # noqa: BLE001 - 单类资源探测失败不影响其他
+                continue
+        rows = getattr(source, "decisions", list)()
+        lines = [str(row.get("detail") or "") for row in rows]
+        return "\n".join(item for item in lines if item) or "尚未探测"
 
     # ------------------------------------------------------------- 收尾
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt 命名
