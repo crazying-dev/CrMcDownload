@@ -205,6 +205,8 @@ class ModrinthClient:
         proxy: str = "",
         token: str = "",
         timeout: float = 25.0,
+        source: object | None = None,
+        prefer_fastest: bool = True,
     ) -> None:
         self.downloader = downloader or Downloader(
             proxy=proxy or None,
@@ -213,6 +215,9 @@ class ModrinthClient:
             timeout=timeout,
             user_agent=UA,
         )
+        #: 镜像与直连的择优器（:class:`offcraft.net.latency.SourceRouter`）
+        self.source = source
+        self.prefer_fastest = bool(prefer_fastest)
         self._mirror: Mirror | None = None
         base = (download_base or "").strip().rstrip("/")
         if base:
@@ -234,6 +239,13 @@ class ModrinthClient:
         if self._mirror is not None and self._mirror_ok is not False:
             bases.append(("mirror", self._mirror.base_url + "/modrinth/v2"))
         bases.append(("direct", MODRINTH_API))
+        if self.prefer_fastest and self.source is not None and len(bases) > 1:
+            rank = getattr(self.source, "rank", None)
+            if callable(rank):
+                try:
+                    bases = rank(bases, "modrinth-api", "/project/sodium")
+                except Exception:  # noqa: BLE001 - 择优失败不影响主流程
+                    pass
         return bases
 
     def _get_json(self, path: str, params: dict[str, Any] | None = None) -> Any:
@@ -331,9 +343,14 @@ class ModrinthClient:
 
     # ----------------------------------------------------------------- files
     def resolve_url(self, url: str) -> str:
-        """把 Modrinth 返回的文件地址转换为下载地址（镜像模式改写 CDN）。"""
+        """把 Modrinth 返回的文件地址转换为下载地址（镜像与直连择优）。"""
         if not url:
             return url
+        if self.source is not None:
+            try:
+                return self.source.rewrite(url)  # type: ignore[attr-defined]
+            except UnknownUpstreamError:
+                return url
         if self._active_mode == "mirror" and self._mirror is not None:
             try:
                 return self._mirror.rewrite(url)

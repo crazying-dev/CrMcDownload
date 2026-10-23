@@ -15,6 +15,7 @@ from offcraft.instances import discover_instances, instance_game_dir
 from offcraft.meta.manifest import VersionManifest
 from offcraft.mirror import DirectSource, Mirror
 from offcraft.net.downloader import Downloader, ProgressTracker
+from offcraft.net.latency import make_source
 from offcraft.pack.offline import export_pack, import_pack
 
 MANIFEST_URL = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json"
@@ -27,8 +28,14 @@ def _game_dir(args, config: Config) -> Path:
 
 def _source(args, config: Config):
     base = (getattr(args, "base", None) or config.download_base or "").strip()
+    fastest = not bool(getattr(args, "no_fastest", False))
     if base:
-        return Mirror(base)
+        return make_source(
+            base,
+            proxy=(getattr(args, "proxy", None) or config.proxy or ""),
+            token=(getattr(args, "token", None) or config.download_token or ""),
+            enabled=fastest and bool(getattr(config, "prefer_fastest", True)),
+        )
     print("提示：未配置下载源，使用官方直连（仅限可直连 Mojang 的网络）", file=sys.stderr)
     return DirectSource()
 
@@ -232,6 +239,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--base", default=None, help="下载源地址（覆盖配置）")
     parser.add_argument("--proxy", default=None, help="代理，如 socks5h://127.0.0.1:1080")
     parser.add_argument("--token", default=None, help="镜像访问令牌")
+    parser.add_argument(
+        "--no-fastest",
+        action="store_true",
+        help="不比较镜像与直连的时延，直接用镜像",
+    )
     parser.add_argument("--workers", type=int, default=None, help="并发下载数")
     sub = parser.add_subparsers(dest="command", required=True)
 

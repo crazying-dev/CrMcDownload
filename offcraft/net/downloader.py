@@ -206,13 +206,48 @@ class Downloader:
             self._pool.conns = pool
         return pool
 
-    def _new_connection(self, scheme: str, host: str, port: int) -> http.client.HTTPConnection:
-        raw = open_tunnel(host, port, self.proxy, self.timeout)
+    def _new_connection(
+        self, scheme: str, host: str, port: int, timeout: float | None = None
+    ) -> http.client.HTTPConnection:
+        raw = open_tunnel(host, port, self.proxy, timeout or self.timeout)
         if scheme == "https":
             raw = self._ssl.wrap_socket(raw, server_hostname=host)
-        conn = http.client.HTTPConnection(host, port, timeout=self.timeout)
+        conn = http.client.HTTPConnection(host, port, timeout=timeout or self.timeout)
         conn.sock = raw
         return conn
+
+    def probe(self, url: str, *, first_chunk: int = 2048, timeout: float | None = None) -> float:
+        """探测首字节耗时（秒），不进入连接池。
+
+        只读取首个数据块（附带 ``Range`` 限制），用于比较镜像与直连的时延；
+        失败时抛 :class:`DownloadError`。
+        """
+        parts = urlsplit(url)
+        if parts.scheme not in ("http", "https") or not parts.hostname:
+            raise DownloadError(f"非法 URL：{url}")
+        scheme = parts.scheme
+        host = parts.hostname
+        port = parts.port or (443 if scheme == "https" else 80)
+        path = parts.path or "/"
+        if parts.query:
+            path += "?" + parts.query
+        headers = self._headers({"Range": f"bytes=0-{max(first_chunk - 1, 0)}"})
+        started = time.monotonic()
+        conn = self._new_connection(scheme, host, port, timeout)
+        try:
+            conn.request("GET", path, headers=headers)
+            resp = conn.getresponse()
+            if resp.status not in (200, 206):
+                raise DownloadError(f"HTTP {resp.status}：{url}")
+            resp.read(first_chunk)
+            return time.monotonic() - started
+        except (OSError, http.client.HTTPException) as exc:
+            raise DownloadError(f"探测失败：{url}（{exc}）") from exc
+        finally:
+            try:
+                conn.close()
+            except OSError:
+                pass
 
     def _open(self, url: str, extra_headers: dict[str, str] | None = None, method: str = "GET"):
         parts = urlsplit(url)

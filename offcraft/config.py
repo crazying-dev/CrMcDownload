@@ -33,6 +33,8 @@ class Config:
     schema: int = SCHEMA
     download_base: str = "https://mc.yjlt.top"
     download_token: str = ""
+    #: 每次下载前比较镜像与直连的时延，择快者使用
+    prefer_fastest: bool = True
     proxy: str = ""
     max_workers: int = 8
     skip_assets: bool = False
