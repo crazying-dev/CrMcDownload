@@ -1,7 +1,14 @@
 import unittest
 from pathlib import Path
 
-from offcraft.install.plan import InstallOptions, build_plan, maven_path, maven_path_with_classifier
+from offcraft.install.plan import (
+    InstallOptions,
+    build_plan,
+    is_installer_provided,
+    library_tasks,
+    maven_path,
+    maven_path_with_classifier,
+)
 from offcraft.meta.rules import OsInfo, is_allowed
 from offcraft.meta.version import MergedVersion, load_version_file
 from offcraft.mirror import Mirror
@@ -78,6 +85,100 @@ class BuildPlanTest(unittest.TestCase):
         plan = build_plan(Path("C:/mc"), "rd-132211", version.raw, version, MIRROR)
         self.assertIsNotNone(plan.client_jar)
         self.assertTrue(plan.tasks)
+
+
+class LibraryTasksTest(unittest.TestCase):
+    """加载器依赖：安装器生成的库要跳过，其余按坐标 / 默认仓库拼 URL。"""
+
+    def test_installer_provided_is_detected(self) -> None:
+        patched = {
+            "name": "net.minecraftforge:forge:26.2-65.1.5:client",
+            "downloads": {
+                "artifact": {
+                    "path": "net/minecraftforge/forge/26.2-65.1.5/forge-26.2-65.1.5-client.jar",
+                    "url": "",
+                    "sha1": "be81e6d24785e467d30f30bcf31c18733233d3fe",
+                    "size": 79191305,
+                }
+            },
+        }
+        self.assertTrue(is_installer_provided(patched))
+        self.assertFalse(
+            is_installer_provided(
+                {
+                    "name": "net.minecraftforge:forge:26.2-65.1.5:universal",
+                    "downloads": {
+                        "artifact": {
+                            "path": "net/minecraftforge/forge/26.2-65.1.5/forge-26.2-65.1.5-universal.jar",
+                            "url": "https://maven.minecraftforge.net/x.jar",
+                        }
+                    },
+                }
+            )
+        )
+        self.assertFalse(is_installer_provided({"name": "a:b:1.0"}))
+
+    def test_patched_client_is_skipped(self) -> None:
+        libraries = [
+            {
+                "name": "net.minecraftforge:forge:26.2-65.1.5:client",
+                "downloads": {
+                    "artifact": {
+                        "path": "net/minecraftforge/forge/26.2-65.1.5/forge-26.2-65.1.5-client.jar",
+                        "url": "",
+                        "sha1": "be81e6d24785e467d30f30bcf31c18733233d3fe",
+                        "size": 79191305,
+                    }
+                },
+            },
+            {
+                "name": "net.minecraftforge:forgespi:8.0.0",
+                "downloads": {
+                    "artifact": {
+                        "path": "net/minecraftforge/forgespi/8.0.0/forgespi-8.0.0.jar",
+                        "url": "https://maven.minecraftforge.net/net/minecraftforge/forgespi/8.0.0/forgespi-8.0.0.jar",
+                        "sha1": "abc",
+                        "size": 10,
+                    }
+                },
+            },
+        ]
+        tasks, warnings = library_tasks(libraries, Path("C:/mc"), MIRROR)
+        self.assertEqual([task.dest.name for task in tasks], ["forgespi-8.0.0.jar"])
+        self.assertTrue(any("安装器生成" in text for text in warnings))
+        self.assertTrue(tasks[0].url.startswith("https://mc.example.com/forgemaven/"))
+
+    def test_maven_default_repo_for_forge_and_neoforge(self) -> None:
+        libraries = [
+            {"name": "net.minecraftforge:fmlcore:26.2-65.1.5"},
+            {"name": "net.neoforged:neoform:1.0"},
+            {"name": "com.example:demo:1.0"},
+        ]
+        tasks, _warnings = library_tasks(libraries, Path("C:/mc"), MIRROR, rewrite=False)
+        self.assertEqual(
+            tasks[0].url, "https://maven.minecraftforge.net/net/minecraftforge/fmlcore/26.2-65.1.5/fmlcore-26.2-65.1.5.jar"
+        )
+        self.assertEqual(
+            tasks[1].url, "https://maven.neoforged.net/releases/net/neoforged/neoform/1.0/neoform-1.0.jar"
+        )
+        self.assertEqual(
+            tasks[2].url, "https://libraries.minecraft.net/com/example/demo/1.0/demo-1.0.jar"
+        )
+
+    def test_duplicate_dest_is_deduped(self) -> None:
+        library = {
+            "name": "net.minecraftforge:forge:26.2-65.1.5:universal",
+            "downloads": {
+                "artifact": {
+                    "path": "net/minecraftforge/forge/26.2-65.1.5/forge-26.2-65.1.5-universal.jar",
+                    "url": "https://maven.minecraftforge.net/u.jar",
+                    "sha1": "abc",
+                    "size": 1,
+                }
+            },
+        }
+        tasks, _warnings = library_tasks([library, dict(library)], Path("C:/mc"), MIRROR)
+        self.assertEqual(len(tasks), 1)
 
 
 if __name__ == "__main__":

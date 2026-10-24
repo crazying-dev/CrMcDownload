@@ -33,7 +33,9 @@ __all__ = [
     "InstallPlan",
     "InstallResult",
     "install",
+    "install_local",
     "prepare_install",
+    "prepare_local_install",
 ]
 
 ProgressHook = Callable[[ProgressTracker], None]
@@ -98,6 +100,59 @@ def prepare_install(
             except Exception as exc:  # noqa: BLE001 - 资源索引失败不阻塞启动
                 plan.warnings.append(f"资源索引获取失败，将跳过资源下载：{exc}")
     return plan
+
+
+def prepare_local_install(
+    mc_dir: Path | str,
+    version_id: str,
+    mirror: Mirror,
+    *,
+    options: InstallOptions | None = None,
+) -> InstallPlan:
+    """用本地 ``versions/<id>/<id>.json`` 生成安装计划。
+
+    加载器版本（Forge / NeoForge / Fabric）不在官方版本清单里，
+    不能走 :func:`prepare_install`，但它的 JSON 里已经有全部依赖坐标，
+    因此可以直接拿本地 JSON 生成计划，把缺的文件补下来。
+    """
+    mc_dir = Path(mc_dir)
+    path = mc_dir / "versions" / version_id / f"{version_id}.json"
+    if not path.is_file():
+        raise InstallError(f"找不到版本 JSON：{path}")
+    try:
+        raw = load_version_file(path)
+    except VersionError as exc:
+        raise InstallError(f"{version_id} 的版本 JSON 读取失败：{exc}") from exc
+    if not isinstance(raw, dict):
+        raise InstallError(f"{version_id} 的版本 JSON 格式错误")
+    raw.setdefault("id", version_id)
+    try:
+        merged = load_version(mc_dir, version_id)
+    except VersionError as exc:
+        raise InstallError(f"{version_id} 合并父版本失败：{exc}") from exc
+    return build_plan(
+        mc_dir,
+        version_id,
+        raw,
+        merged,
+        mirror,
+        options=options or InstallOptions(include_assets=False),
+    )
+
+
+def install_local(
+    mc_dir: Path | str,
+    version_id: str,
+    mirror: Mirror,
+    downloader: Downloader,
+    *,
+    tracker: ProgressTracker | None = None,
+    cancel: threading.Event | None = None,
+    options: InstallOptions | None = None,
+) -> InstallResult:
+    """``prepare_local_install`` + ``install``：补齐加载器版本缺的依赖。"""
+    plan = prepare_local_install(mc_dir, version_id, mirror, options=options)
+    return install(plan, downloader, tracker=tracker, cancel=cancel)
 
 
 def install(

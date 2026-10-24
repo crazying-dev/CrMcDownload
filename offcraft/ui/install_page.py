@@ -11,6 +11,7 @@ from typing import Any
 
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QFrame,
     QHBoxLayout,
@@ -39,7 +40,7 @@ __all__ = ["InstallPage", "LoaderRow"]
 
 
 class LoaderRow(QFrame):
-    """一行：图标 + 名称/说明 + 版本下拉 + 状态徽标。"""
+    """一行：复选框 + 图标 + 名称/说明 + 版本下拉 + 状态徽标。"""
 
     picked = pyqtSignal(str)
     changed = pyqtSignal()
@@ -63,13 +64,21 @@ class LoaderRow(QFrame):
         self.setProperty("picked", False)
         self.setProperty("dimmed", False)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setMinimumHeight(100 if tall else 66)
+        self.setMinimumHeight(92 if tall else 66)
         # 行高固定（内容决定），剩余高度留给卡片底部的弹性空白，避免四行被均分拉高
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(16, 12, 16, 12)
         layout.setSpacing(14)
+
+        # 三个加载器前面各一个复选框（单选语义：勾一个自动取消其它）
+        self.check: QCheckBox | None = None
+        if not tall:
+            self.check = QCheckBox()
+            self.check.setToolTip("勾选后用这个加载器安装")
+            self.check.clicked.connect(self._on_check_clicked)
+            layout.addWidget(self.check, 0, Qt.AlignmentFlag.AlignVCenter)
 
         self._icon_size = 60 if tall else 40
         self.icon = QLabel()
@@ -81,6 +90,8 @@ class LoaderRow(QFrame):
         column.setSpacing(3)
         self.title = QLabel(title)
         self.title.setObjectName("h2" if tall else "h3")
+        # 第一行（原版）不要标题，输入框自己说明用途
+        self.title.setVisible(not tall)
         column.addWidget(self.title)
 
         self.name_edit: QLineEdit | None = None
@@ -101,6 +112,7 @@ class LoaderRow(QFrame):
         self.blurb = QLabel(blurb)
         self.blurb.setObjectName("muted")
         self.blurb.setWordWrap(True)
+        self.blurb.setVisible(not tall)
         column.addWidget(self.blurb)
         layout.addLayout(column, 1)
 
@@ -148,9 +160,16 @@ class LoaderRow(QFrame):
             Qt.CursorShape.PointingHandCursor if enabled else Qt.CursorShape.ArrowCursor
         )
         self.badge.set(badge_text, tone if enabled or badge_text else "gray")
+        # 第一行不显示「可选」，只在「已安装」这类有意义的状态才出现
+        self.badge.setVisible(bool(badge_text) and not (self.tall and badge_text == "可选"))
         self.title.setObjectName("h2" if self.tall and enabled else ("h3" if enabled else "dimTitle"))
         self.blurb.setObjectName("muted" if enabled else "dimText")
         self.version_combo.setEnabled(enabled)
+        if self.check is not None:
+            # 冲突 / 不兼容：复选框变灰不可勾
+            self.check.setEnabled(enabled)
+            if not enabled:
+                self.check.setChecked(False)
         if self.name_edit is not None:
             self.name_edit.setEnabled(True)
         self.setToolTip(reason)
@@ -161,6 +180,8 @@ class LoaderRow(QFrame):
         if not self.enabled_row:
             on = False
         self.setProperty("picked", bool(on))
+        if self.check is not None:
+            self.check.setChecked(bool(on))
         self._repolish()
 
     def _repolish(self) -> None:
@@ -199,6 +220,14 @@ class LoaderRow(QFrame):
         return bool(self.selected_version())
 
     # ------------------------------------------------------------------ 交互
+    def _on_check_clicked(self, checked: bool) -> None:
+        """勾选即选中该加载器；取消勾选就退回原版。"""
+        if not self.enabled_row:
+            if self.check is not None:
+                self.check.setChecked(False)
+            return
+        self.picked.emit(self.key if checked else "vanilla")
+
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802 - Qt 命名
         if self.enabled_row and event.button() == Qt.MouseButton.LeftButton:
             self.picked.emit(self.key)

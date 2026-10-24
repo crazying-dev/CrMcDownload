@@ -17,11 +17,43 @@ __all__ = [
     "InstallError",
     "add_asset_objects",
     "build_plan",
+    "is_installer_provided",
+    "library_tasks",
     "maven_path",
 ]
 
 LIBS = "https://libraries.minecraft.net/"
 RESOURCES = "https://resources.download.minecraft.net/"
+FORGE_MAVEN = "https://maven.minecraftforge.net/"
+NEOFORGE_MAVEN = "https://maven.neoforged.net/releases/"
+
+#: 上游没有 URL 时按 group 猜测仓库（Forge / NeoForge 的 JSON 里常见）
+_GROUP_MAVENS: tuple[tuple[str, str], ...] = (
+    ("net.minecraftforge", FORGE_MAVEN),
+    ("net.neoforged", NEOFORGE_MAVEN),
+)
+
+
+def _default_repo(name: str) -> str:
+    group = str(name or "").split(":", 1)[0]
+    lowered = group.lower()
+    for prefix, repo in _GROUP_MAVENS:
+        if lowered == prefix or lowered.startswith(prefix + "."):
+            return repo
+    return LIBS
+
+
+def is_installer_provided(library: dict[str, Any]) -> bool:
+    """该库是否由加载器安装器在本地生成（有路径与哈希但 url 为空）。
+
+    Forge / NeoForge 会把「补丁后的客户端 jar」（``:client`` 分类器）写成
+    ``url: ""``，它由安装器的 processor 用 vanilla jar 打补丁生成，
+    上游 maven 上根本没有这个文件，不能当普通依赖去下载。
+    """
+    artifact = (library.get("downloads") or {}).get("artifact") or {}
+    if not artifact or not artifact.get("path"):
+        return False
+    return not artifact.get("url") and not library.get("url")
 
 
 class InstallError(RuntimeError):
@@ -91,17 +123,23 @@ def _artifact_url(library: dict[str, Any], path: str) -> str:
     artifact = (library.get("downloads") or {}).get("artifact") or {}
     if artifact.get("url"):
         return artifact["url"]
-    base = library.get("url") or LIBS
-    return base.rstrip("/") + "/" + path
+    base = library.get("url")
+    if base:
+        return base.rstrip("/") + "/" + path
+    return _default_repo(str(library.get("name") or "")) + path
 
 
 def _add_library(
     library: dict[str, Any],
-    plan: InstallPlan,
+    tasks: list[DownloadTask],
+    warnings: list[str],
+    mc_dir: Path,
     mirror: Mirror,
     os_info: OsInfo,
     features: dict[str, bool],
     options: InstallOptions,
+    *,
+    rewrite: bool = True,
 ) -> None:
     if not is_allowed(library.get("rules"), os_info, features):
         return
@@ -112,14 +150,20 @@ def _add_library(
     elif library.get("name"):
         path = maven_path(library["name"])
     else:
-        plan.warnings.append(f"库缺少坐标，已跳过：{library!r}")
+        warnings.append(f"库缺少坐标，已跳过：{library!r}")
+        return
+
+    if is_installer_provided(library):
+        warnings.append(f"该文件由加载器安装器生成，跳过下载：{library.get('name')}")
         return
 
     url = _artifact_url(library, path)
-    plan.tasks.append(
+    if rewrite:
+        url = mirror.rewrite(url)
+    tasks.append(
         DownloadTask(
-            url=mirror.rewrite(url),
-            dest=plan.mc_dir / "libraries" / path,
+            url=url,
+            dest=Path(mc_dir) / "libraries" / path,
             sha1=artifact.get("sha1") if artifact else None,
             size=artifact.get("size") if artifact else None,
             label=library.get("name", path),
@@ -136,10 +180,10 @@ def _add_library(
         library["name"], classifier
     )
     native_url = (native or {}).get("url") or f"{LIBS.rstrip('/')}/{native_path}"
-    plan.tasks.append(
+    tasks.append(
         DownloadTask(
-            url=mirror.rewrite(native_url),
-            dest=plan.mc_dir / "libraries" / native_path,
+            url=mirror.rewrite(native_url) if rewrite else native_url,
+            dest=Path(mc_dir) / "libraries" / native_path,
             sha1=(native or {}).get("sha1"),
             size=(native or {}).get("size"),
             label=f"{library.get('name', path)}:{classifier}",
@@ -170,6 +214,44 @@ def _asset_tasks(plan: InstallPlan, index: dict[str, Any], mirror: Mirror) -> li
             )
         )
     return tasks
+
+
+def library_tasks(
+    libraries: list[dict[str, Any]],
+    mc_dir: Path | str,
+    mirror: Mirror,
+    *,
+    os_info: OsInfo | None = None,
+    features: dict[str, bool] | None = None,
+    options: InstallOptions | None = None,
+    rewrite: bool = True,
+) -> tuple[list[DownloadTask], list[str]]:
+    """任意库列表 → 下载任务（可用于版本 JSON，也可用于安装器的 install_profile）。
+
+    ``rewrite=False`` 生成的是「官方源直连」版本，供镜像失败时回退。
+    安装器本地生成的库（``url`` 为空）会被跳过并记一条警告。
+    """
+    mc_dir = Path(mc_dir)
+    os_info = os_info or OsInfo()
+    features = features or {}
+    options = options or InstallOptions(include_assets=False)
+    tasks: list[DownloadTask] = []
+    warnings: list[str] = []
+    for library in libraries:
+        if not isinstance(library, dict):
+            continue
+        _add_library(
+            library,
+            tasks,
+            warnings,
+            mc_dir,
+            mirror,
+            os_info,
+            features,
+            options,
+            rewrite=rewrite,
+        )
+    return _dedupe(tasks), list(dict.fromkeys(warnings))
 
 
 def build_plan(
@@ -214,7 +296,16 @@ def build_plan(
         plan.warnings.append(f"{version_id} 的 JSON 没有 client 下载信息")
 
     for library in merged.libraries:
-        _add_library(library, plan, mirror, os_info, features, options)
+        _add_library(
+            library,
+            plan.tasks,
+            plan.warnings,
+            mc_dir,
+            mirror,
+            os_info,
+            features,
+            options,
+        )
 
     index = merged.asset_index or {}
     plan.asset_index_id = index.get("id", "")

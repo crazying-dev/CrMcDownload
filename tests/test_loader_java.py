@@ -1,7 +1,9 @@
 """Java 运行时与加载器：纯函数 / 清单解析层测试（不联网）。"""
 
+import json
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 
 from offcraft.content import java as java_mod
@@ -11,7 +13,9 @@ from offcraft.content.loader import (
     LoaderError,
     _neoforge_prefix,
     install_loader,
+    installer_version_id,
     list_loader_versions,
+    loader_dependency_tasks,
     supports_mods,
 )
 from offcraft.mirror import Mirror
@@ -149,6 +153,98 @@ class LoaderVersionsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             result = install_loader(tmp, "1.21.1", "vanilla", "", mirror=MIRROR, downloader=_FakeDownloader())
         self.assertEqual(result, "1.21.1")
+
+
+PROFILE_LIBRARY = {
+    "name": "net.minecraftforge:installertools:1.4.5",
+    "downloads": {
+        "artifact": {
+            "path": "net/minecraftforge/installertools/1.4.5/installertools-1.4.5.jar",
+            "url": "https://maven.minecraftforge.net/net/minecraftforge/installertools/1.4.5/installertools-1.4.5.jar",
+            "sha1": "aaa",
+            "size": 100,
+        }
+    },
+}
+VERSION_LIBRARY = {
+    "name": "net.minecraftforge:forgespi:8.0.0",
+    "downloads": {
+        "artifact": {
+            "path": "net/minecraftforge/forgespi/8.0.0/forgespi-8.0.0.jar",
+            "url": "https://maven.minecraftforge.net/net/minecraftforge/forgespi/8.0.0/forgespi-8.0.0.jar",
+            "sha1": "bbb",
+            "size": 200,
+        }
+    },
+}
+PATCHED_CLIENT = {
+    "name": "net.minecraftforge:forge:26.2-65.1.5:client",
+    "downloads": {
+        "artifact": {
+            "path": "net/minecraftforge/forge/26.2-65.1.5/forge-26.2-65.1.5-client.jar",
+            "url": "",
+            "sha1": "ccc",
+            "size": 300,
+        }
+    },
+}
+
+
+def _write_installer(path: Path, version_id: str) -> Path:
+    """造一个带有 install_profile.json / version.json 的最小安装器 jar。"""
+    profile = {"version": version_id, "libraries": [PROFILE_LIBRARY]}
+    version = {"id": version_id, "libraries": [VERSION_LIBRARY, PATCHED_CLIENT]}
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("install_profile.json", json.dumps(profile))
+        archive.writestr("version.json", json.dumps(version))
+    return path
+
+
+class LoaderDependencyTest(unittest.TestCase):
+    """安装器依赖预下载：三个来源都要覆盖，补丁后的 client jar 不能当依赖下。"""
+
+    def test_version_id_from_installer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            jar = _write_installer(Path(tmp) / "forge-installer.jar", "26.2-forge-65.1.5")
+            self.assertEqual(installer_version_id(jar), "26.2-forge-65.1.5")
+
+    def test_tasks_cover_profile_and_version_and_local(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            jar = _write_installer(root / "forge-installer.jar", "26.2-forge-65.1.5")
+            local_dir = root / "versions" / "26.2-forge-65.1.5"
+            local_dir.mkdir(parents=True)
+            (local_dir / "26.2-forge-65.1.5.json").write_text(
+                json.dumps({"id": "26.2-forge-65.1.5", "libraries": [PROFILE_LIBRARY]}),
+                encoding="utf-8",
+            )
+            tasks, warnings = loader_dependency_tasks(root, jar, MIRROR)
+            names = sorted(task.dest.name for task in tasks)
+            self.assertEqual(
+                names, ["forgespi-8.0.0.jar", "installertools-1.4.5.jar"]
+            )
+            for task in tasks:
+                self.assertTrue(task.url.startswith("https://mc.example.com/forgemaven/"))
+            self.assertTrue(any("安装器生成" in text for text in warnings))
+
+    def test_direct_variant_keeps_official_urls(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            jar = _write_installer(root / "forge-installer.jar", "26.2-forge-65.1.5")
+            tasks, _warnings = loader_dependency_tasks(root, jar, MIRROR, rewrite=False)
+            self.assertTrue(
+                all(task.url.startswith("https://maven.minecraftforge.net/") for task in tasks)
+            )
+
+    def test_broken_installer_is_tolerated(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            jar = root / "broken.jar"
+            jar.write_bytes(b"not a zip")
+            tasks, warnings = loader_dependency_tasks(root, jar, MIRROR)
+            self.assertEqual(tasks, [])
+            self.assertEqual(warnings, [])
+            self.assertEqual(installer_version_id(jar), "")
 
 
 if __name__ == "__main__":

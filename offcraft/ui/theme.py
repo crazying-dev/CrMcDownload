@@ -472,6 +472,12 @@ QCheckBox::indicator {{
 QCheckBox::indicator:checked {{
     background: {ACCENT}; border-color: {ACCENT};
 }}
+QCheckBox::indicator:disabled {{
+    background: #F2F4F8; border-color: #DCE2EC;
+}}
+QCheckBox::indicator:checked:disabled {{
+    background: #C6CFDD; border-color: #C6CFDD;
+}}
 QTreeWidget, QListWidget {{
     background: {CARD};
     border: none;

@@ -49,6 +49,9 @@ SORTS = [
     ("最新发布", "newest"),
 ]
 
+# 下拉框末尾的哨兵项：选中它等于「打开资源管理器挑一个文件夹」
+PICK_FOLDER = "__pick_folder__"
+
 LOADER_CHOICES = [
     ("全部加载器", ""),
     ("Fabric", "fabric"),
@@ -71,7 +74,10 @@ class ContentPage(QWidget):
         self.versions: list[ProjectVersion] = []
         #: 手动挑选的文件夹目标（与实例目标一起组成下拉列表）
         self.extra_targets: list[Target] = []
+        # 上一次有效的安装目标（取消选择文件夹时回退到这里）
+        self._last_target_key = ""
         self._token = 0
+        self._loaded = False
         self._build()
 
     # ------------------------------------------------------------------ UI
@@ -187,18 +193,13 @@ class ContentPage(QWidget):
             detail.add(self.name_edit)
         else:
             detail.add(self._label("安装到", "muted"))
-            self.target_row = QHBoxLayout()
-            self.target_row.setSpacing(6)
             self.target_combo = QComboBox()
-            self.target_combo.setToolTip("选择已装版本（自动换算成它的游戏目录）或任意游戏文件夹")
+            self.target_combo.setToolTip(
+                "选择已装版本（自动换算成它的游戏目录），"
+                "或选「选择文件夹…」自己挑一个游戏文件夹"
+            )
             self.target_combo.currentIndexChanged.connect(self._on_target_changed)
-            self.target_row.addWidget(self.target_combo, 1)
-            self.folder_button = QPushButton("选目录")
-            self.folder_button.setFixedWidth(62)
-            self.folder_button.setToolTip("选择一个游戏文件夹（例如别处的 .minecraft 或整合包目录）")
-            self.folder_button.clicked.connect(self.pick_folder)
-            self.target_row.addWidget(self.folder_button)
-            detail.add_layout(self.target_row)
+            detail.add(self.target_combo)
             self.target_path = self._label("", "mutedSmall")
             self.target_path.setWordWrap(True)
             detail.add(self.target_path)
@@ -229,8 +230,24 @@ class ContentPage(QWidget):
 
     # ----------------------------------------------------------------- data
     def refresh(self) -> None:
+        self._loaded = True
         self._refresh_filters()
         self.reload()
+
+    def ensure_loaded(self) -> None:
+        """切到本页时调用：首次进入就直接拉列表 + 首个项目的版本。"""
+        if not self._loaded:
+            self.refresh()
+            return
+        self.sync_filters()
+        if self.selected is None and self.hits:
+            self.list.setCurrentRow(0)
+            item = self.list.item(0)
+            if item is not None:
+                self._on_select(item)
+            return
+        if self.selected is not None and not self.versions:
+            self._load_versions(self.selected)
 
     def sync_filters(self) -> None:
         """只刷新筛选框（不触发新的网络请求）。"""
@@ -308,6 +325,8 @@ class ContentPage(QWidget):
         options = self.target_options()
         current = self.target_combo.currentData()
         keep = select_key or (current.key if isinstance(current, Target) else "")
+        if not keep:
+            keep = self._last_target_key
         self.target_combo.blockSignals(True)
         self.target_combo.clear()
         for target in options:
@@ -327,24 +346,55 @@ class ContentPage(QWidget):
                         break
         if index < 0 and options:
             index = 0
+        # 末尾固定放一个「选择文件夹…」，选中它就会打开资源管理器
+        self.target_combo.addItem("选择文件夹…", PICK_FOLDER)
         self.target_combo.setCurrentIndex(index)
         self.target_combo.blockSignals(False)
+        target = self.current_target()
+        self._last_target_key = target.key if target is not None else ""
         self._refresh_install_state()
 
     def current_target(self) -> Target | None:
         target = self.target_combo.currentData()
         return target if isinstance(target, Target) else None
 
+    def _last_target(self) -> Target | None:
+        key = self._last_target_key
+        if not key:
+            return None
+        for item in self.target_options():
+            if item.key == key:
+                return item
+        return None
+
+    def _restore_target(self) -> None:
+        """取消文件选择时回退到上一次有效的安装目标。"""
+        self.target_combo.blockSignals(True)
+        index = -1
+        key = self._last_target_key
+        if key:
+            for position in range(self.target_combo.count()):
+                data = self.target_combo.itemData(position)
+                if isinstance(data, Target) and data.key == key:
+                    index = position
+                    break
+        if index < 0 and self.target_combo.count() > 1:
+            index = 0
+        self.target_combo.setCurrentIndex(index)
+        self.target_combo.blockSignals(False)
+        self._refresh_install_state()
+
     def pick_folder(self) -> None:
-        """手动挑一个游戏文件夹作为安装目标。"""
+        """手动挑一个游戏文件夹作为安装目标；直接退出则回退到上一次的选择。"""
         start = str(self._mc_dir())
-        target = self.current_target()
+        target = self.current_target() or self._last_target()
         if target is not None and Path(target.path).is_dir():
             start = str(target.path)
         folder = QFileDialog.getExistingDirectory(
             self, f"选择要安装{KIND_NAMES.get(self.kind, '内容')}的游戏文件夹", start
         )
         if not folder:
+            self._restore_target()
             return
         picked = target_from_folder(folder)
         if not any(item.key == picked.key for item in self.extra_targets):
@@ -485,17 +535,21 @@ class ContentPage(QWidget):
             self.detail_badges.addWidget(Badge(category, "gray"))
         self.detail_badges.addStretch(1)
         self.open_button.setEnabled(True)
-        self.versions = []
-        self.version_combo.clear()
-        self.version_combo.addItem("正在读取版本……", None)
-        self.install_button.setEnabled(False)
         if self.kind == "modpack":
             self.name_edit.setText(hit.title)
         if hit.icon_url:
             self.window.request_icon(
                 self.window.content_client().resolve_url(hit.icon_url), self.detail_icon.setPixmap, 60
             )
-        game_version, loader, _ = "", "", ""
+        self._load_versions(hit)
+
+    def _load_versions(self, hit: ProjectHit) -> None:
+        """拉取当前选中项目的兼容版本（自动带上筛选框里的游戏版本/加载器）。"""
+        self.versions = []
+        self.version_combo.clear()
+        self.version_combo.addItem("正在读取版本……", None)
+        self.install_button.setEnabled(False)
+        game_version, loader = "", ""
         if self.game_combo.currentData():
             game_version = str(self.game_combo.currentData())
         if self.loader_combo.isVisible() and self.loader_combo.currentData():
@@ -509,7 +563,7 @@ class ContentPage(QWidget):
             except Exception as exc:  # noqa: BLE001
                 self.window.post(lambda: self._versions_failed(hit.id, str(exc)))
                 return
-            self.window.post(lambda: self._show_versions(hit.id, versions))
+            self.window.post(lambda: self._show_versions(hit, versions))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -520,8 +574,8 @@ class ContentPage(QWidget):
         self.version_combo.addItem("版本读取失败", None)
         self.detail_hint.setText(message)
 
-    def _show_versions(self, project_id: str, versions) -> None:
-        if self.selected is None or self.selected.id != project_id:
+    def _show_versions(self, hit: ProjectHit, versions) -> None:
+        if self.selected is None or self.selected.id != hit.id:
             return
         self.versions = list(versions)
         self.version_combo.blockSignals(True)
@@ -546,6 +600,12 @@ class ContentPage(QWidget):
         self._refresh_install_state()
 
     def _on_target_changed(self, _index: int) -> None:
+        if self.target_combo.currentData() == PICK_FOLDER:
+            # 选中「选择文件夹…」= 立即弹资源管理器；取消则回退
+            self.pick_folder()
+            return
+        target = self.current_target()
+        self._last_target_key = target.key if target is not None else self._last_target_key
         self._refresh_install_state()
 
     def _dest_text(self, dest: Path) -> str:
@@ -566,7 +626,7 @@ class ContentPage(QWidget):
         target = self.current_target()
         if target is None:
             self.install_button.setEnabled(False)
-            self.target_path.setText("还没有可选的游戏目录：先下载一个版本，或点「选目录」手动选择")
+            self.target_path.setText("还没有可选的游戏目录：先下载一个版本，或在上面选「选择文件夹…」")
             self.detail_hint.setText("先安装一个游戏版本，才能安装内容。")
             return
         dest = target.subdir(self.kind)

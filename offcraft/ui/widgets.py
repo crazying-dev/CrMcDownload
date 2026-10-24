@@ -22,18 +22,30 @@ __all__ = ["Badge", "Card", "ComboPolisher", "ContentRow", "ElidedLabel", "Tile"
 
 
 def polish_combo(combo: QComboBox) -> None:
-    """去掉下拉列表默认的黑色外框（Qt 弹出视图自带 FrameShape + 系统窗口边）。"""
+    """去掉下拉列表默认的黑色外框。
+
+    Qt 的 combo 弹出层是一个独立的 ``QComboBoxPrivateContainer`` 窗口：Windows 上它
+    自带 1px 原生边框（看起来就是一圈黑边），而且 ``WA_TranslucentBackground`` 必须
+    在原生窗口创建前设上才生效。所以顺序固定为：先设属性，再用 ``setWindowFlag``
+    强制重建一次原生窗口（重建时属性才会生效），最后换成无边框弹窗。
+    """
     view = combo.view()
     if view is None:
         return
     try:
         view.setFrameShape(QFrame.Shape.NoFrame)
+        view.setContentsMargins(0, 0, 0, 0)
         window = view.window()
-        if window is not None and window is not view:
-            # 弹出容器本身是横跨全屏的无名 QFrame，给了样式才会跟主题走
+        # 只在真拿到弹层窗口时动手：弹层未创建时 view.window() 会返回主窗口，
+        # 盲目改它会把整个主窗口变成无边框。
+        is_popup = window is not None and window is not view and window is not combo.window()
+        if is_popup and (window.windowFlags() & Qt.WindowType.Popup):
             window.setObjectName("comboPopup")
+            # 1) 先声明透明背景 2) 再改窗口标志（会重建原生窗口，属性随之生效）
             window.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+            window.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
             window.setWindowFlag(Qt.WindowType.NoDropShadowWindowHint, True)
+            window.setContentsMargins(0, 0, 0, 0)
         combo.setMaxVisibleItems(14)
     except (AttributeError, RuntimeError):
         pass

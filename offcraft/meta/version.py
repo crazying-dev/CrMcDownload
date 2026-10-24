@@ -75,7 +75,17 @@ class MergedVersion:
 
     @property
     def jar_id(self) -> str:
-        return self.raw.get("jar") or self.id
+        """启动时要拼进 classpath 的 client jar 所在的版本 id。
+
+        显式写了 ``jar``（整合包常用）就用它；否则用继承链最底层的原版版本。
+        加载器（Fabric profile / Forge、NeoForge 安装器）生成的版本目录里**没有自己的
+        jar**，早期实现直接返回 ``self.id``，导致组装启动命令时去要一个永远不存在的
+        ``versions/<加载器版本>/<加载器版本>.jar``，启动必然报「缺少 1 个依赖文件」。
+        """
+        explicit = self.raw.get("jar")
+        if explicit:
+            return str(explicit)
+        return self.chain[0] if self.chain else self.id
 
     @property
     def logging_client(self) -> dict[str, Any] | None:

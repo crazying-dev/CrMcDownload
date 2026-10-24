@@ -5,7 +5,7 @@
 - 「启动游戏」：账户、当前实例概览、内存滑杆、启动按钮、版本列表与快捷入口。
 - 「下载中心」：游戏版本 + Modrinth 的模组 / 整合包 / 资源包 / 光影 + Java 运行时。
 - 「插件」：插件市场 / 官方 / 社区 / 其他 / 已下载（仅框架，接口未接入）。
-- 「设置」：游戏目录、版本隔离、Java、内存；下载源只读，按 F12 才可修改。
+- 「设置」：游戏目录、版本隔离、Java、内存。
 
 所有网络请求都在后台线程执行，结果通过 ``self.events`` 回到界面线程，
 因此搜索、安装、下载过程中窗口不会卡死。
@@ -69,7 +69,6 @@ from offcraft.content.loader import (
     LoaderBuild,
     install_loader,
     list_loader_versions,
-    supports_mods,
 )
 from offcraft.content.modpack import unique_instance_name
 from offcraft.content.target import (
@@ -88,7 +87,7 @@ from offcraft.instances import (
     safe_instance_id,
 )
 from offcraft.launch.auth import make_profile, validate_name
-from offcraft.launch.command import LaunchOptions, build_command
+from offcraft.launch.command import LaunchError, LaunchOptions, build_command
 from offcraft.launch.java import list_java, probe_java
 from offcraft.launch.process import GameProcess
 from offcraft.meta.manifest import VersionManifest, VersionSummary
@@ -106,7 +105,7 @@ from offcraft.ui.theme import (
     human_size,
     initial_pixmap,
 )
-from offcraft.ui.widgets import Badge, Card, ElidedLabel, Tile, ComboPolisher
+from offcraft.ui.widgets import Badge, Card, ElidedLabel, Tile, ComboPolisher, polish_combo
 
 MANIFEST_URL = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json"
 
@@ -203,12 +202,12 @@ def _reveal(folder: Path | str) -> None:
 
 
 class SourceDialog(QDialog):
-    """F12：修改下载源（默认 https://mc.yjlt.top）。"""
+    """下载源设置（仅 F12 可打开，界面上不展示具体地址）。"""
 
     def __init__(self, parent: QWidget, config: Config) -> None:
         super().__init__(parent)
         self.config = config
-        self.setWindowTitle("下载源设置（F12）")
+        self.setWindowTitle("下载源设置")
         self.setMinimumWidth(480)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(18, 16, 18, 14)
@@ -591,6 +590,8 @@ class MainWindow(QMainWindow):
         self.resize(width, height)
 
         self._build()
+        # 所有下拉框统一去黑边（不依赖事件过滤器时序：弹层是独立顶层窗口）
+        self.polish_combos()
         QShortcut(QKeySequence("F12"), self, activated=self.open_source_dialog)
         self._refresh_source_badge()
         self._refresh_java_combo()
@@ -600,6 +601,11 @@ class MainWindow(QMainWindow):
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._drain)
         self._timer.start(80)
+
+    def polish_combos(self) -> None:
+        """建完界面后把每个下拉框的弹层都设成无边框透明窗口。"""
+        for combo in self.findChildren(QComboBox):
+            polish_combo(combo)
 
     # ------------------------------------------------------------- 布局
     def _label(self, text: str, name: str = "muted") -> QLabel:
@@ -1045,7 +1051,8 @@ class MainWindow(QMainWindow):
 
         badge_row = QHBoxLayout()
         badge_row.setContentsMargins(0, 0, 0, 0)
-        self.source_badge = Badge("镜像", "green")
+        self.source_badge = Badge("", "green")
+        self.source_badge.setVisible(False)
         badge_row.addWidget(self.source_badge)
         badge_row.addStretch(1)
         column.addLayout(badge_row)
@@ -1425,9 +1432,7 @@ class MainWindow(QMainWindow):
         side.setContentsMargins(SIDE_PAD, u(1), SIDE_PAD, u(2))
         side.setSpacing(u(0.75))
         side.addWidget(self._label("设置", "title"))
-        intro = self._label(
-            "游戏目录、版本隔离、Java 与内存在这里调整；下载源由发布者固定，只有按 F12 才能修改。"
-        )
+        intro = self._label("游戏目录、版本隔离、Java 与内存在这里调整。")
         intro.setWordWrap(True)
         side.addWidget(intro)
         side.addSpacing(u(1.5))
@@ -1440,9 +1445,6 @@ class MainWindow(QMainWindow):
         data_button = QPushButton("打开数据目录")
         data_button.clicked.connect(self._open_data_dir)
         side.addWidget(data_button)
-        source_button = QPushButton("下载源设置（F12）")
-        source_button.clicked.connect(self.open_source_dialog)
-        side.addWidget(source_button)
         side.addStretch(1)
         outer.addWidget(left)
 
@@ -1517,35 +1519,26 @@ class MainWindow(QMainWindow):
         java.add(self.settings_jvm)
         layout.addWidget(java)
 
-        source = Card()
-        source.add(self._label("下载源", "h2"))
-        source_hint = self._label("客户端只与下载源通信，游戏文件 / Fabric / Forge / Modrinth 都经它代理")
-        source_hint.setWordWrap(True)
-        source.add(source_hint)
+        download = Card()
+        download.add(self._label("下载", "h2"))
+        # 下载源地址 / 令牌 / 代理不在界面上展示（只能按 F12 打开设置窗口改），
+        # 控件保留但不入布局，供 _load_settings_values / save_settings 读写。
         self.settings_base = QLineEdit(self.config.download_base)
-        self.settings_base.setReadOnly(True)
-        self.settings_base.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        source.add(self.settings_base)
-        pair = QHBoxLayout()
-        pair.setSpacing(8)
         self.settings_token = QLineEdit(self.config.download_token)
         self.settings_token.setPlaceholderText("访问令牌（可选）")
-        self.settings_token.setReadOnly(True)
-        self.settings_token.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        pair.addWidget(self.settings_token, 1)
         self.settings_proxy = QLineEdit(self.config.proxy)
         self.settings_proxy.setPlaceholderText("代理（可选，如 http://127.0.0.1:7890）")
-        self.settings_proxy.setReadOnly(True)
-        self.settings_proxy.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        pair.addWidget(self.settings_proxy, 1)
-        source.add_layout(pair)
+        for field in (self.settings_base, self.settings_token, self.settings_proxy):
+            field.setReadOnly(True)
+            field.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            field.setVisible(False)
         self.settings_fastest = QCheckBox("下载时比较镜像与直连的延迟，自动用更快的一边")
         self.settings_fastest.setChecked(bool(getattr(self.config, "prefer_fastest", True)))
         self.settings_fastest.setToolTip(
             "开启后，每一类资源下载前会先各测一次首字节耗时（只读 2 KB），\n"
-            "镜像更快就用镜像，直连更快就直连；结论 10 分钟内复用。"
+            "更快的通道会被自动选中；结论 10 分钟内复用。"
         )
-        source.add(self.settings_fastest)
+        download.add(self.settings_fastest)
         workers_row = QHBoxLayout()
         workers_row.setSpacing(8)
         workers_row.addWidget(self._label("并发下载数"))
@@ -1555,19 +1548,8 @@ class MainWindow(QMainWindow):
         self.settings_workers.setEnabled(False)
         workers_row.addWidget(self.settings_workers)
         workers_row.addStretch(1)
-        test = QPushButton("测试连接")
-        test.clicked.connect(self._test_source)
-        workers_row.addWidget(test)
-        change = QPushButton("修改下载源（F12）")
-        change.clicked.connect(self.open_source_dialog)
-        workers_row.addWidget(change)
-        source.add_layout(workers_row)
-        hint = self._label("下载源已由发布者固定，按 F12 打开修改窗口", "mutedSmall")
-        hint.setWordWrap(True)
-        source.add(hint)
-        self.settings_source_state = self._label("")
-        source.add(self.settings_source_state)
-        layout.addWidget(source)
+        download.add_layout(workers_row)
+        layout.addWidget(download)
 
         about = Card()
         about.add(self._label("关于", "h2"))
@@ -1584,9 +1566,6 @@ class MainWindow(QMainWindow):
         open_data = QPushButton("打开数据目录")
         open_data.clicked.connect(self._open_data_dir)
         about_row.addWidget(open_data)
-        source_dialog = QPushButton("下载源设置（F12）")
-        source_dialog.clicked.connect(self.open_source_dialog)
-        about_row.addWidget(source_dialog)
         about_row.addStretch(1)
         about.add_layout(about_row)
         layout.addWidget(about)
@@ -1598,14 +1577,10 @@ class MainWindow(QMainWindow):
         return page
 
     def _build_overlays(self) -> None:
-        """版本号（右下）、下载源（左下）与任务面板（浮层），都不占内容区高度。"""
+        """版本号（右下）与任务面板（浮层），都不占内容区高度。"""
         central = self.centralWidget()
         if central is None:
             return
-        self.source_label = QLabel("下载源：-", central)
-        self.source_label.setObjectName("mutedSmall")
-        self.source_label.setToolTip("下载源已由发布者固定，按 F12 可打开修改窗口")
-        self.source_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
 
         self.version_label = QLabel(f"v{__version__}", central)
         self.version_label.setObjectName("versionTag")
@@ -1628,10 +1603,7 @@ class MainWindow(QMainWindow):
                 max(0, bottom - self.version_label.height()),
             )
             self.version_label.raise_()
-        if hasattr(self, "source_label"):
-            self.source_label.adjustSize()
-            self.source_label.move(u(1.25), max(0, bottom - self.source_label.height()))
-            self.source_label.raise_()
+
         if hasattr(self, "task_panel") and self.task_panel.isVisible():
             hint = self.task_panel.sizeHint()
             panel_w = min(max(hint.width(), u(30)), max(u(20), width - u(4)))
@@ -1714,24 +1686,13 @@ class MainWindow(QMainWindow):
         page = self.content_pages.get(key)
         if page is None:
             return
-        if page.hits or page.offset:
-            page.sync_filters()
-        else:
-            page.refresh()
+        # 一进页就直接拉列表 + 首个项目的版本（首次进入全量拉，之后只补缺失的）
+        page.ensure_loaded()
 
     def _refresh_source_badge(self) -> None:
-        base = self.config.download_base or ""
-        if base:
-            host = base.split("//", 1)[-1].split("/")[0]
-            self.source_badge.set(f"镜像 · {host}", "green")
-            self.download_sub.setToolTip(f"游戏与内容均通过 {base} 下载")
-            if hasattr(self, "source_label"):
-                self.source_label.setText(f"下载源：{host}")
-        else:
-            self.source_badge.set("官方源", "gray")
-            self.download_sub.setToolTip("未配置下载源，将直连官方地址")
-            if hasattr(self, "source_label"):
-                self.source_label.setText("下载源：官方")
+        """下载源不在界面上展示（仅 F12 窗口可见），这里只负责保持徽标隐藏。"""
+        if hasattr(self, "source_badge"):
+            self.source_badge.setVisible(False)
 
     # ------------------------------------------------------------- 实例
     def game_dir(self) -> Path:
@@ -1815,8 +1776,6 @@ class MainWindow(QMainWindow):
         pack = read_pack_metadata(self.game_dir(), instance.id)
         if pack and pack.get("name"):
             parts.insert(0, f"整合包 {pack.get('name')}")
-        if not supports_mods(instance.loader):
-            parts.append("原版 · 不能装模组（点 ⋯ 可安装加载器）")
         if instance.broken:
             parts.append("版本 JSON 损坏")
         self.home_hint.setText("  ·  ".join(parts))
@@ -1927,7 +1886,9 @@ class MainWindow(QMainWindow):
         def worker(cancel: threading.Event) -> str:
             version = load_version(game_dir, instance.id)
             profile = make_profile(self.config.username)
-            plan = build_command(version, game_dir, profile, options=options)
+            plan = self._build_command_with_repair(
+                version, game_dir, profile, options, cancel
+            )
             for warning in plan.warnings:
                 self.post_log("WARN", warning)
             self.post_log("INFO", f"启动 {instance.id}（{plan.java.display}）")
@@ -1947,6 +1908,44 @@ class MainWindow(QMainWindow):
             return "游戏运行中"
 
         self.run_task(f"启动 {instance.id}", worker)
+
+    def _build_command_with_repair(
+        self,
+        version,
+        game_dir: Path,
+        profile,
+        options: LaunchOptions,
+        cancel: threading.Event,
+    ):
+        """构建启动命令；加载器实例缺依赖时先自动补齐再重试。
+
+        Forge / NeoForge 安装器只负责写版本 JSON 与打补丁，依赖得由启动器下；
+        历史版本（或安装器被网络卡住时）会少一堆库，这里用版本 JSON 自愈，
+        不再让用户看到「缺少 N 个依赖文件」。
+        """
+        try:
+            return build_command(version, game_dir, profile, options=options)
+        except LaunchError as exc:
+            if "缺少" not in str(exc) or not version.raw.get("inheritsFrom"):
+                raise
+        from offcraft.install.installer import install_local
+
+        downloader = self.make_downloader()
+        mirror = self.source(downloader)
+        self.post_log("WARN", f"{version.id} 缺少依赖文件，正在自动补齐……")
+        self.set_phase(f"补齐 {version.id} 依赖")
+        result = install_local(
+            game_dir, version.id, mirror, downloader, cancel=cancel
+        )
+        if not result.ok:
+            first = result.report.failed[0] if result.report.failed else (None, "未知错误")
+            raise RuntimeError(f"依赖补齐失败：{first[1]}")
+        self.post_log(
+            "INFO",
+            f"已补齐 {len(result.report.succeeded)} 个依赖文件，重新启动",
+        )
+        repaired = load_version(game_dir, version.id)
+        return build_command(repaired, game_dir, profile, options=options)
 
     def stop_game(self) -> None:
         if self.process is not None:
@@ -2596,7 +2595,7 @@ class MainWindow(QMainWindow):
         self._load_settings_values()
         self.manifest = None
         self._content_client = None
-        self.post_log("INFO", f"下载源已更新：{self.config.download_base}")
+        self.post_log("INFO", "下载源已更新")
         self.refresh_remote()
 
     # ------------------------------------------------------------- 设置
@@ -2670,8 +2669,8 @@ class MainWindow(QMainWindow):
             index = combo.findData(override)
             combo.setCurrentIndex(index if index >= 0 else 0)
             combo.blockSignals(False)
-        if not candidates and hasattr(self, "settings_source_state"):
-            self.settings_source_state.setText("未检测到 Java，可点「添加 Java」手动指定")
+        if not candidates:
+            self.settings_java.setToolTip("未检测到 Java，可点「添加 Java」手动指定")
 
     def _on_java_changed(self, index: int) -> None:
         if index < 0:
@@ -2716,42 +2715,6 @@ class MainWindow(QMainWindow):
         if index >= 0:
             self.settings_java.setCurrentIndex(index)
         self.notice(f"已添加 Java {major}：{path}")
-
-    def _test_source(self) -> None:
-        base = self.settings_base.text().strip().rstrip("/") or "https://mc.yjlt.top"
-        self.settings_source_state.setText("正在测试连接……")
-
-        def worker() -> None:
-            try:
-                downloader = self.make_downloader(progress=False, workers=1)
-                data = downloader.fetch_json(f"{base}/health")
-            except Exception as exc:  # noqa: BLE001
-                message = f"连接失败：{exc}"
-            else:
-                version = data.get("version") if isinstance(data, dict) else ""
-                message = "连接正常" + (f" · 服务端 {version}" if version else "")
-                message += "\n" + self._latency_report(base)
-            self.post(lambda: self.settings_source_state.setText(message))
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    def _latency_report(self, base: str) -> str:
-        """实测一次镜像/直连时延，并刷新择优结论（供「测试连接」展示）。"""
-        if not bool(getattr(self.config, "prefer_fastest", True)):
-            return "已关闭自动择优：固定走镜像"
-        self._sources.clear()
-        source = self.source()
-        for official in (
-            MANIFEST_URL,
-            "https://maven.minecraftforge.net/net/minecraftforge/forge/maven-metadata.xml",
-        ):
-            try:
-                source.rewrite(official)  # 触发一次探测并写入缓存
-            except Exception:  # noqa: BLE001 - 单类资源探测失败不影响其他
-                continue
-        rows = getattr(source, "decisions", list)()
-        lines = [str(row.get("detail") or "") for row in rows]
-        return "\n".join(item for item in lines if item) or "尚未探测"
 
     # ------------------------------------------------------------- 收尾
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt 命名

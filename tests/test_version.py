@@ -79,6 +79,35 @@ class MergeTest(unittest.TestCase):
             self.assertEqual(merged.assets, "5")
             self.assertEqual(merged.chain, ("1.20.1", "1.20.1-forge"))
 
+    def test_loader_version_uses_base_jar(self) -> None:
+        """加载器版本自己没有 jar，必须回落到原版的 jar（否则启动报缺少依赖）。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write(
+                root,
+                "1.20.1",
+                {"id": "1.20.1", "mainClass": "net.minecraft.client.main.Main"},
+            )
+            self._write(
+                root,
+                "1.20.1-forge-47.2.0",
+                {"id": "1.20.1-forge-47.2.0", "inheritsFrom": "1.20.1"},
+            )
+            self.assertEqual(load_version(root, "1.20.1-forge-47.2.0").jar_id, "1.20.1")
+            self.assertEqual(load_version(root, "1.20.1").jar_id, "1.20.1")
+
+    def test_explicit_jar_wins(self) -> None:
+        """整合包常见写法：child 用 ``jar`` 显式指向原版，优先遵守。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write(root, "1.20.1", {"id": "1.20.1", "mainClass": "a.B"})
+            self._write(
+                root,
+                "pack",
+                {"id": "pack", "inheritsFrom": "1.20.1", "jar": "1.20.1"},
+            )
+            self.assertEqual(load_version(root, "pack").jar_id, "1.20.1")
+
     def test_cycle_detected(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

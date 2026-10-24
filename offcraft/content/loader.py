@@ -7,6 +7,8 @@ import subprocess
 import threading
 import time
 import xml.etree.ElementTree as ET
+import zipfile
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -21,7 +23,9 @@ __all__ = [
     "LoaderBuild",
     "LoaderError",
     "install_loader",
+    "installer_version_id",
     "list_loader_versions",
+    "loader_dependency_tasks",
     "loader_note",
     "loader_support",
     "loader_title",
@@ -65,6 +69,10 @@ NEOFORGE_INSTALLER = (
 )
 
 _INSTALLER_TIMEOUT = 900.0
+
+#: 加载器安装器 jar 内的描述文件
+PROFILE_ENTRY = "install_profile.json"
+VERSION_ENTRY = "version.json"
 
 
 class LoaderError(RuntimeError):
@@ -335,22 +343,45 @@ def _run_installer(
     *,
     cancel: threading.Event | None = None,
     phase: Callable[[str], None] | None = None,
-) -> None:
+    offline: bool = True,
+) -> list[str]:
+    """运行加载器安装器，返回最后几行输出。
+
+    默认带 ``--offline``：依赖已由 :func:`_download_installer_dependencies`
+    经镜像备齐，这样安装器不会去官方 maven 拉文件（本机会超时卡死）。
+    输出必须边跑边读：安装器输出超过管道缓冲区后会卡在 write 上，
+    旧实现等进程结束再 ``read()``，大输出时会直接死锁。
+    """
     if phase:
         phase("运行加载器安装器（可能需要几分钟）")
     command = [str(java), "-jar", str(jar), "--installClient", str(mc_dir)]
+    if offline:
+        command.append("--offline")
     flags = 0
     if hasattr(subprocess, "CREATE_NO_WINDOW"):
         flags = subprocess.CREATE_NO_WINDOW  # type: ignore[attr-defined]
     proc = subprocess.Popen(
         command,
         cwd=str(mc_dir),
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         creationflags=flags,
     )
+    tail: deque[str] = deque(maxlen=60)
+
+    def _pump(stream) -> None:
+        try:
+            for raw in iter(stream.readline, b""):
+                text = raw.decode("utf-8", errors="replace").strip()
+                if text:
+                    tail.append(text)
+        except (OSError, ValueError):  # 进程被终止时管道会关
+            pass
+
+    reader = threading.Thread(target=_pump, args=(proc.stdout,), daemon=True)
+    reader.start()
     deadline = time.monotonic() + _INSTALLER_TIMEOUT
-    output: list[str] = []
     try:
         while proc.poll() is None:
             if cancel is not None and cancel.is_set():
@@ -360,18 +391,132 @@ def _run_installer(
                 proc.terminate()
                 raise LoaderError("安装器运行超时")
             time.sleep(0.25)
-        stream = proc.stdout
-        if stream is not None:
-            tail = stream.read().decode("utf-8", errors="replace").strip().splitlines()
-            output = tail[-8:]
     finally:
         if proc.poll() is None:
             proc.kill()
+        reader.join(timeout=10)
         if proc.stdout is not None:
             proc.stdout.close()
+    output = list(tail)
     if proc.returncode != 0:
-        detail = " / ".join(output) if output else f"退出码 {proc.returncode}"
+        detail = " / ".join(output[-8:]) if output else f"退出码 {proc.returncode}"
         raise LoaderError(f"安装器执行失败：{detail}")
+    return output
+
+
+def _zip_json(jar: Path, name: str) -> dict:
+    """读取安装器 jar 里的 JSON（不存在或损坏时返回空 dict）。"""
+    try:
+        with zipfile.ZipFile(jar) as archive:
+            return json.loads(archive.read(name).decode("utf-8", errors="replace"))
+    except (KeyError, OSError, ValueError, zipfile.BadZipFile):
+        return {}
+
+
+def installer_version_id(jar: Path | str) -> str:
+    """安装器将要生成的版本 id（如 ``26.2-forge-65.1.5``）。"""
+    jar = Path(jar)
+    bundled = _zip_json(jar, VERSION_ENTRY)
+    profile = _zip_json(jar, PROFILE_ENTRY)
+    return str(bundled.get("id") or profile.get("version") or "")
+
+
+def loader_dependency_tasks(
+    mc_dir: Path | str,
+    jar: Path | str,
+    mirror: Mirror,
+    *,
+    version_id: str = "",
+    rewrite: bool = True,
+) -> tuple[list[DownloadTask], list[str]]:
+    """安装器需要的全部依赖 → 下载任务。
+
+    Forge / NeoForge 安装器自己下载依赖时用的是官方 maven，在本机经常
+    超时挂住（症状：日志停在某个库上、退出码却仍是 0）；这里把
+    *安装器自身 install_profile 的库* 与 *版本 JSON 的库* 一并经镜像
+    先备齐，安装器就能全程「File exists: Checksum validated」本地完成。
+    """
+    from offcraft.install.plan import InstallOptions, library_tasks
+
+    mc_dir = Path(mc_dir)
+    jar = Path(jar)
+    libraries: list[dict] = []
+    profile = _zip_json(jar, PROFILE_ENTRY)
+    bundled = _zip_json(jar, VERSION_ENTRY)
+    for source in (profile.get("libraries"), bundled.get("libraries")):
+        libraries.extend(item for item in (source or []) if isinstance(item, dict))
+    target = str(bundled.get("id") or profile.get("version") or version_id or "")
+    local = mc_dir / "versions" / target / f"{target}.json" if target else None
+    if local is not None and local.is_file():
+        try:
+            created = json.loads(local.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            created = {}
+        libraries.extend(
+            item for item in (created.get("libraries") or []) if isinstance(item, dict)
+        )
+    return library_tasks(
+        libraries,
+        mc_dir,
+        mirror,
+        options=InstallOptions(include_assets=False),
+        rewrite=rewrite,
+    )
+
+
+def _run_tasks(
+    downloader: Downloader,
+    tasks: list[DownloadTask],
+    *,
+    cancel: threading.Event | None = None,
+) -> list[tuple[Path, str]]:
+    """执行一批下载任务，返回失败的 ``(目标文件, 原因)`` 列表。"""
+    report = downloader.run(tasks, tracker=ProgressTracker(), cancel=cancel)
+    return [(Path(task.dest), message) for task, message in report.failed]
+
+
+def _missing_files(mc_dir: Path, version_id: str) -> list[Path]:
+    """启动前缺的依赖文件（与启动器同一套 classpath 计算）。"""
+    from offcraft.launch.libraries import build_classpath
+    from offcraft.meta.version import VersionError, load_version
+
+    try:
+        version = load_version(mc_dir, version_id)
+    except VersionError as exc:
+        raise LoaderError(f"读取 {version_id} 失败：{exc}") from exc
+    return list(build_classpath(version, mc_dir).missing)
+
+
+def _download_installer_dependencies(
+    mc_dir: Path,
+    jar: Path,
+    mirror: Mirror,
+    downloader: Downloader,
+    *,
+    phase: Callable[[str], None] | None = None,
+    cancel: threading.Event | None = None,
+) -> None:
+    """经镜像先备齐安装器所需依赖（镜像失败再回退官方源）。"""
+    tasks, _warnings = loader_dependency_tasks(mc_dir, jar, mirror)
+    if not tasks:
+        return
+    if phase:
+        phase(f"准备依赖（{len(tasks)} 个文件）")
+    failed = _run_tasks(downloader, tasks, cancel=cancel)
+    if not failed:
+        return
+    direct, _ = loader_dependency_tasks(mc_dir, jar, mirror, rewrite=False)
+    alternatives = {Path(task.dest): task for task in direct}
+    retry = [
+        alternatives[dest] for dest, _message in failed if dest in alternatives
+    ]
+    if retry:
+        if phase:
+            phase(f"换官方源重试（{len(retry)} 个文件）")
+        failed = _run_tasks(downloader, retry, cancel=cancel)
+    if failed:
+        first = failed[0][1]
+        raise LoaderError(f"依赖下载失败（{len(failed)} 个）：{first}")
 
 
 def install_loader(
@@ -410,20 +555,13 @@ def install_loader(
             json.dumps(profile, ensure_ascii=False, indent=2), encoding="utf-8"
         )
         if manifest is not None:
-            from offcraft.install.installer import install, prepare_install
-            from offcraft.install.plan import InstallOptions
+            from offcraft.install.installer import install_local
 
             if phase:
                 phase("下载 Fabric 依赖库")
-            plan = prepare_install(
-                mc_dir,
-                version_id,
-                manifest,
-                mirror,
-                downloader,
-                options=InstallOptions(include_assets=False),
+            result = install_local(
+                mc_dir, version_id, mirror, downloader, cancel=cancel
             )
-            result = install(plan, downloader, tracker=ProgressTracker(), cancel=cancel)
             if not result.ok:
                 first = result.report.failed[0] if result.report.failed else (None, "未知错误")
                 raise LoaderError(f"Fabric 依赖下载失败：{first[1]}")
@@ -446,12 +584,58 @@ def install_loader(
         ):
             raise LoaderError(f"{loader} 安装器下载失败")
         java_path = _pick_java(mc_dir, java)
+        # 关键：先把安装器自己（install_profile）与版本 JSON 里的依赖全部经镜像备齐。
+        # 否则安装器会自己去官方 maven 拉，本机经常超时卡住、退出码却是 0，
+        # 结果只写了个版本 JSON，依赖少一堆（就是 26.2-forge-65.1.5 启动失败的原因）。
+        _download_installer_dependencies(
+            mc_dir, jar, mirror, downloader, phase=phase, cancel=cancel
+        )
+        expected = installer_version_id(jar)
         before = _version_dirs(mc_dir)
-        _run_installer(mc_dir, jar, java_path, cancel=cancel, phase=phase)
-        created = sorted(_version_dirs(mc_dir) - before)
-        if not created:
-            raise LoaderError(f"{loader} 安装器没有生成新的版本目录")
-        created.sort(key=lambda item: (item == mc_version, _version_key(item)), reverse=True)
-        return created[0]
+        try:
+            _run_installer(mc_dir, jar, java_path, cancel=cancel, phase=phase)
+        except LoaderError:
+            if cancel is not None and cancel.is_set():
+                raise
+            if phase:
+                phase(f"{loader} 离线安装未成功，改用联网重试")
+            _run_installer(
+                mc_dir, jar, java_path, cancel=cancel, phase=phase, offline=False
+            )
+        version_id = ""
+        if expected and (mc_dir / "versions" / expected).is_dir():
+            version_id = expected
+        else:
+            created = sorted(_version_dirs(mc_dir) - before)
+            if created:
+                created.sort(
+                    key=lambda item: (item == mc_version, _version_key(item)), reverse=True
+                )
+                version_id = created[0]
+        if not version_id:
+            raise LoaderError(f"{loader} 安装器没有生成版本目录")
+
+        # 安装器负责写 JSON 与打补丁（补丁后的 client jar 由它的 processor 生成，
+        # 上游 maven 上没有）；剩下的依赖按版本 JSON 再校一遍，缺什么补什么。
+        from offcraft.install.installer import InstallError, install_local
+
+        if phase:
+            phase(f"校验 {loader} 依赖")
+        try:
+            result = install_local(
+                mc_dir, version_id, mirror, downloader, cancel=cancel
+            )
+        except InstallError as exc:
+            raise LoaderError(f"{loader} 依赖补全失败：{exc}") from exc
+        if not result.ok:
+            first = result.report.failed[0] if result.report.failed else (None, "未知错误")
+            raise LoaderError(f"{loader} 依赖下载失败：{first[1]}")
+        missing = _missing_files(mc_dir, version_id)
+        if missing:
+            names = "、".join(path.name for path in missing[:3])
+            raise LoaderError(
+                f"{loader} 安装不完整，还缺 {len(missing)} 个依赖（{names}…），请重试"
+            )
+        return version_id
 
     raise LoaderError(f"不支持的加载器：{loader}")
