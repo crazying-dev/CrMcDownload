@@ -55,7 +55,7 @@
 
 - 设置页开关「下载时比较镜像与直连的延迟，自动用更快的一边」（`config.json` 的 `prefer_fastest`，默认开）；
 - 关闭后回到恒走镜像的旧行为；命令行可用 `--no-fastest`；
-- 设置页「测试连接」会清空缓存并重新探测，逐条列出 `镜像 578ms / 直连 641ms → 镜像` 这样的结论；
+- 结论按「下载源 + 代理 + 择优开关」缓存在内存里，改下载源或重启后自动重测；
 - 自建镜像被限速而官源直连更快时自动改走直连，反之当官源被阻断时仍由镜像中转照顾。
 
 ### 安装版本页（0.5.3）
@@ -88,6 +88,38 @@
 - **镜像服务端**：缓存容量上限（LRU 淘汰）、临时文件回收、过期项定期清扫、同一文件单飞回源、
   上游并发上限（超出返回 503），`/health` 暴露 `cache.stats()`。
 
+### 加载器安装修复与界面精修（0.5.4）
+
+**Forge / NeoForge 装完启动报「缺少依赖」的根因与修法**（用户实测：`26.2-forge-65.1.5` 缺 24 项依赖，原版 `26.2` 正常）：
+
+1. **`jar_id` 取错**：`MergedVersion.jar_id` 原本在版本 JSON 缺 `jar` 时回落到加载器自己的 id，
+   而加载器实例根本没有独立 jar → 改为回落到父版本（`inheritsFrom` / `chain[0]`）；
+2. **安装器拉依赖时卡死**：Forge 安装器自己去官方 maven 取库（`maven.creeperhost.net` 等，
+   `HttpURLConnection` 无读超时），旧实现只在进程退出后 `read()` 管道，900s 超时被 terminate，
+   结果版本 JSON 写完了、依赖全缺。现在先按 `install_profile.json` + 安装器内 `version.json` 的库表
+   从镜像预下载全部依赖，再以 `--offline` 跑安装器（失败才回退联网），且边跑边读输出，
+   卡住时日志能看到停在哪个库；
+3. **补丁 jar 不存在于上游**：`net.minecraftforge:forge:<ver>:client` 的 `artifact.url` 是空串，
+   该文件由安装器的 processor 用 `data/client.lzma` 本地打补丁生成 → 新增
+   `plan.is_installer_provided()` 把「有 path 但没有 url」的库识别为安装器产物并跳过下载；
+4. **装完复核**：用 `build_classpath` 检查缺失，仍缺就报「安装不完整，还缺 N 个依赖」，不再静默放行；
+5. **老实例自愈**：启动时若因缺库失败且带 `inheritsFrom`，自动 `install_local` 补齐后重试一次。
+
+同一版本还顺手修了 Fabric 分支（改用 `install_local`，原来误用 `prepare_install` 导致加载器 id 不在官方清单里）。
+
+**界面精修 9 项**：
+
+- 启动页 hero 去掉「原版 · 不能装模组」一类说教文案；
+- 全局不再展示下载源（地址、令牌、代理、徽章、设置页「下载源」卡片与「测试连接」全部移除），
+  `F12` 仍可打开「下载源设置」窗口；启动器也不提供日志查看入口；
+- 下载中心去掉「选择目录」按钮行，改为目标目录下拉末尾的「选择文件夹…」哨兵项，
+  取消选择回到上一次有效目录；
+- 修复下拉框弹层黑边（`polish_combo`：无边框 + 透明背景 + 零边距 + 最多 14 项）；
+- 下载中心改为首次切换时才拉清单（`ensure_loaded()`，再次进入只同步筛选）；
+- 安装版本页的非 high 行加复选框（用该加载器安装），high 行隐藏标题/副标题、高度收窄、
+  「可选」徽章不再显示；
+- 配套 `devtools/ui_smoke.py` 断言更新（新增「界面不出现 `mc.yjlt.top`」全局扫描等）。
+
 ```bash
 cd user
 python main.py                     # 需要 PyQt6
@@ -100,7 +132,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging\build_installer.ps
 #         启动的进程写不了 C 盘，安装器会直接弹框说明而不是静默失败
 ```
 
-当前版本：`0.5.3`（`user`、`user-*` 分支）。
+当前版本：`0.5.4`（`user`、`user-*` 分支）。
 
 配置默认在 `%APPDATA%\CrMCDownload\config.json`。
 
