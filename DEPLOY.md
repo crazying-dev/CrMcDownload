@@ -164,6 +164,43 @@ pnpm build          # 产出 page/dist（base=/page/）
 - **回滚 / 停止**：探测线程跑在独立事件循环里，`systemctl stop` / `Ctrl-C` 会 `loop.close()` + 线程 join 后干净退出；
 - 皮肤上传上限 64 KiB、尺寸仅 `64×64` / `64×32`（Pillow 校验），非 PNG 或尺寸不符返回中文错误。
 
+### 6.3 离线联机：特权插件按需下载与中继
+
+离线联机以官方特权插件 `offline-multiplayer` 形态提供（基础安装包不内置、客户端在插件页按需下载启用）。
+服务端参与两部分：
+
+- **插件包静态下发**：`GET /plugin/offline-multiplayer.manifest.json` 与 `GET /plugin/offline-multiplayer.zip`（**免令牌、
+  只读、防路径穿越**），与 `/api` `/skin` `/page` 走**同一 `server {}` 反代**，无需新增 nginx 规则。文件由
+  `devtools/build_mp_plugin.py` 产出（zip + `sha256/size/abi` 描述符），落到 `MIRROR_PLUGIN_DIR` 指向的目录：
+
+  ```bash
+  # 在有 pynacl 的构建机（与客户端同 ABI：cp312-win_amd64）上产出，拷入插件目录
+  cd user   # 或仓库根；脚本以源码树 offcraft/p2p 为输入
+  python ../devtools/build_mp_plugin.py --out "$MIRROR_PLUGIN_DIR"   # 默认 server/plugins
+  ```
+
+  部署后自检：
+
+  ```bash
+  curl -s -o /dev/null -w '%{http_code}\n' "https://mc.yjlt.top/plugin/offline-multiplayer.manifest.json"  # 200
+  curl -s -o /dev/null -w '%{http_code}\n' "https://mc.yjlt.top/plugin/offline-multiplayer.zip"            # 200
+  ```
+
+- **中继信令与转发**：控制面走主 HTTP 端口的 `POST /p2p/*`（经同一反代）；数据面由服务端的独立 **TCP 中继**
+  转发端到端密文帧。**中继端口不变**（默认 `25577`），需在防火墙/安全组单独放行 TCP（非 80/443）；
+  服务端只见密文、**不解密、不持明文/密码/auth_key**，准入靠客户端 `proof` HMAC，房间登记存于 `p2p_rooms`（仅名字/属主/时间）。
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `MIRROR_P2P_ENABLE` | `off` | 开启中继信令路由（未设则 `/p2p/*` 与中继不启用） |
+| `MIRROR_P2P_RELAY_PORT` | `25577` | 数据面 TCP 中继监听端口（**与一期一致，不变**） |
+| `MIRROR_P2P_RELAY_HOST` | 空（回落 `host`） | 对外通告地址，供客户端连回中继（反代/NAT 后需设为公网可达地址） |
+| `MIRROR_P2P_MAX_ROOMS` | `256` | 同时在途实时会话上限（内存态，防滥用） |
+| `MIRROR_P2P_MAX_ROOMS_PER_DEVICE` | `10` | 每设备（`owner=device_id`）未删除房间配额上限 |
+| `MIRROR_P2P_ROOM_TTL` | `180` | 实时会话无活动回收秒数 |
+| `MIRROR_P2P_RELAY_BYTES_CAP` | `536870912` | 单条中继连接累计转发字节上限（超限断开，避免开放中继） |
+| `MIRROR_PLUGIN_DIR` | `./plugins` | `GET /plugin/*` 读取的插件包目录（systemd/Docker 下建议绝对路径并挂载） |
+
 ## 备选：无子域名（独立端口）
 
 若暂时不能加 DNS，可让 Caddy 监听 `:8443` 并自签/使用已有证书：
