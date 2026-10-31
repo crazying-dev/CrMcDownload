@@ -41,6 +41,11 @@ maven 路由下 `*.xml`（`maven-metadata.xml`）按元数据缓存（TTL 600s�
 未识别主机直接报错，绝不回落到直连。唯一的例外是**内容层**（模组 / 整合包 / 资源包 / 光影）：
 当镜像缺少新路由或返回非 2xx 时会主动回落到 Modrinth 官方 API，以免自建镜像未升级时功能不可用。
 
+> 上述「绝不回落直连」只约束**上游下载的 URL 改写**。0.6.0 新增的 `/api`、`/skin`、`/page` 是镜像
+> 自身提供的端点（客户端用 `api_url()` 直接拼 `{base}` 访问，不经 URL 改写）；而「联机」功能的
+> Server List Ping 是客户端**主动连接任意 Minecraft 服务器**的裸 TCP —— 这是对「只与自己域名通信」
+> 原则的有意例外，由 SSRF 护栏（默认拒绝私网 / 回环）兜底，详见下文「联机状态探测」。
+
 ## 下载源选择（镜像 vs 直连）
 
 0.5.0 起，镜像不再是唯一出口：每次取文件前先比较「镜像中转」和「上游直连」的时延，择快者使用。
@@ -160,3 +165,65 @@ GitHub 及其 CDN 主机；`check_url(url, allow_untrusted=False)` 返回中文�
 `SingleFlight` 让同一 URL 只回源一次，其余请求在 `flight_wait` 内等待；
 上游并发由 `BoundedSemaphore(max_upstreams)` 控制，超限直接 503；
 `/health` 返回 `cache` 统计（字节数、文件数、命中/淘汰计数）。
+
+## 联机状态探测（0.6.0）
+
+```
+客户端 offcraft/servers/
+  ping.py      标准库 socket 实现 Server List Ping（Handshake protocol=-1 → Login Start → JSON Response）
+  ssrf.py      地址解析 + 公网判定（拒绝回环/私网/链路本地/CGNAT/IPv6 ULA），allow_local_servers 才放开
+  store.py     收藏 + 最近访问（config.json / servers.json）+ 探测结果缓存（TTL 300s）
+  directory.py 拉服务端热度榜（GET {base}/api/servers/list|detail），走 token-origin 规则
+```
+
+服务端 `server_mirror/servers.py` 用**标准库 asyncio**（非 aiohttp —— SLP 是裸 TCP，`asyncio.open_connection`
+更贴切）在独立线程的事件循环里按 `SERVER_PROBE_INTERVAL` 批量探测 `enabled` 服务器，写 `ping_history` 与
+`servers_state`；停止时 `call_soon_threadsafe(loop.stop)` + 线程 join 保证干净退出。探测目标同样过 SSRF 校验。
+
+## 皮肤链路（0.6.0）
+
+```
+客户端 offcraft/skins/            服务端 /skin                      游戏内
+  upload.py   Pillow 校验/判型   SkinStore: PNG magic+verify    CSL mod 请求 {base}/skin/%s.png
+  avatar.py   8×8 头像 NEAREST    64×64 / 64×32、64KiB、原子写
+  csl.py      Modrinth 装 CSL + 写 CustomSkinLoader.json
+```
+
+皮肤走 token-origin 规则：上传（`POST /skin/<name>.png`）带 `X-OffCraft-Token`，读取免令牌。
+`offcraft/account/` 预留 `AccountProvider` 抽象（当前仅 `OfflineAccount`），`command.py` 支持
+`options.java_agent` 拼 `-javaagent=`，后续接 LittleSkin / authlib-injector 只需新增 provider 实现。
+
+## 服务端 API 与热度数据库（0.6.0）
+
+`proxy.py:_dispatch` 在 `/health` 之后按前缀分流到 `api.py:ApiRouter`（`resolve()` 保持只做代理白名单，不改语义）：
+
+| 接口 | 说明 |
+| --- | --- |
+| `GET /api/servers/list?q&limit&offset` | 热度榜 + 最近状态（读免令牌，`Cache-Control: max-age=15`） |
+| `GET /api/servers/detail?host&port` | 含玩家列表与最近 24 点延迟曲线 |
+| `POST /api/servers/report` | 客户端上报新服务器，需 `X-OffCraft-Token`，按 host 令牌桶限流 |
+| `GET /api/stats/overview\|cache\|download\|servers` | Web 看板数据 |
+
+`db.py:Database` 用标准库 `sqlite3`（WAL + `RLock` 串行写，`check_same_thread=False`），三张表：
+`servers`（成员 + reports/last_seen）、`servers_state`（最近一次探测快照）、`ping_history`（时间线）。
+热度 = `reports + 近24h平均在线/50 + last_seen 半衰加分`，同分按在线降序再按延迟升序。
+
+## 插件模型（0.6.0，仅官方）
+
+```
+offcraft/plugins/
+  base.py      PluginManifest(frozen) + Plugin 协议；PLUGIN_API 主版本门控
+  context.py   PluginContext 只暴露白名单能力：config 命名空间(plugins.<id>.)/notice/log/
+               register_nav_item/register_task/instance_list/download_file(内部强制过 trust+镜像)
+  registry.py  从 builtin/ 按 import 白名单发现官方插件；启停持久化 plugins.json（原子写）
+  builtin/diagnostics.py  示例官方插件（capability mirror_probe），聚合连通性自检卡片
+```
+
+不给原始 `MainWindow`、不给任意文件写、不给裸网络接口；第三方目录扫描留 TODO 且不执行。
+
+## 启动耗时与可观测性（0.6.0）
+
+`launch_game` worker 分段 `perf_counter`（load_version / classpath / natives / java / build / spawn）写日志文件
+（界面不提供日志入口）。提速手段：Java 探测结果磁盘缓存（`config.java_cache`）、natives 解压与 classpath 校验
+`ThreadPoolExecutor(2)` 并行、版本解析进程内 LRU（键 `id + mtime_ns + size`）、页面懒构建（`_page_factories` +
+`_ensure_page`，首屏只造启动页）。`devtools/launch_probe.py` 在固定 fixture 上量各段耗时作回归基线。

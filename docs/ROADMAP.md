@@ -15,7 +15,8 @@
 | M11 | 下载源择优：镜像 vs 直连时延探测（`SourceRouter`） | 已完成 |
 | M12 | 安装版本页与内容安装目标（`Target`）、下拉框美化；Issue #1 安全与容量加固（`v0.5.3`） | 已完成 |
 | M13 | Forge/NeoForge 依赖预下载 + `--offline` 安装 + 启动自愈；界面精修 9 项（`v0.5.4`） | 已完成 |
-| M10 | 插件市场（API 尚未接入，目前只有页面框架） | 待开始 |
+| M14 | 联机状态探测 + 热度榜、自定义皮肤（CSL + `/skin`）、Web 看板（`/page`）、启动提速、插件雏形（仅官方）（`v0.6.0`） | 已完成 |
+| M10 | 插件市场化（第三方来源 + 动态加载）与外置登录账户服务（LittleSkin / authlib-injector）—— **0.6.x** | 待开始 |
 
 ## 验收基线
 
@@ -32,8 +33,8 @@
 
 | 仓库 | 命令 | 数量 |
 | --- | --- | --- |
-| `user` | `python -m unittest discover -s tests` | 154 |
-| `server-mirror` / `server` | 同上 | 33 |
+| `user` | `python -m unittest discover -s tests` | 228 |
+| `server` | `python -m pytest tests -q`（或 `unittest discover`） | 90 |
 | `user-downloader` / `user-launcher` / `user-ui` | 同上 | 快照落后于 `user`，未随 0.5.4 同步 |
 
 另有离屏界面自检 `devtools/ui_smoke.py`（断言式）与截图 `devtools/ui_shots.py`。

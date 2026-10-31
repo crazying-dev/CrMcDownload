@@ -33,13 +33,15 @@
 
 ## 客户端
 
-顶部导航栏（启动 / 下载 / 设置 / 插件）+ 下方内容区，窗口固定 3:2（默认 1200×800，最小 1080×720）：
+顶部导航栏（启动 / 联机 / 下载 / 设置 / 插件）+ 下方内容区，窗口固定 3:2（默认 1200×800，最小 1080×720）：
 
 - **启动游戏**：账号行、版本大图卡、内存滑块、启动主按钮；右侧版本列表（右键：启动 / 版本设置 /
   **安装加载器…** / 打开游戏目录 / 删除实例）与 6 个快捷磁贴
+- **联机大厅**：热门榜（服务端 SQLite 热度）+ 我的收藏 + 最近访问，每卡显示 favicon / MOTD / 版本 /
+  在线人数 / 延迟，支持刷新、复制地址、详情、加入游戏（≥1.20.2 直连，否则复制地址提示手动添加）
 - **下载中心**：游戏版本（正式版 / 快照 / 远古版 / 已安装，支持搜索与安装最新版）、
   模组 / 整合包 / 资源包 / 光影（Modrinth 搜索 → 详情 → 版本 → 一键安装）、Java（Mojang 官方 java-runtime）
-- **插件**：市场 / 官方 / 社区 / 其他 / 已下载（框架，插件 API 未接入）
+- **插件**：仅官方内置插件（capability 白名单，不加载第三方代码），示例插件「连通性自检」；其余分区保留框架
 - **设置**：游戏目录、版本隔离、Java（自动检测 / 手动添加）、内存、JVM 参数、
   下载源（只读，按 F12 才能改），不再提供日志查看入口
 - 底部任务面板与状态栏（连接状态、下载源、实例统计）
@@ -120,6 +122,25 @@
   「可选」徽章不再显示；
 - 配套 `devtools/ui_smoke.py` 断言更新（新增「界面不出现 `mc.yjlt.top`」全局扫描等）。
 
+### 联机、皮肤与看板（0.6.0）
+
+- **联机大厅**：客户端用标准库 socket 实现 Server List Ping（延迟 / MOTD / 版本 / 在线人数 / 玩家列表 / favicon），
+  新增「联机」导航页（左榜单右卡片），首屏先渲染缓存再后台刷新，主线程不阻塞；收藏与最近访问存本地，
+  热度榜由服务端 SQLite 维护（客户端上报 + 后台 `asyncio` 批量探测 + 时间衰减）。
+- **SSRF 护栏**：这是本项目首次允许客户端主动连任意主机，默认拒绝回环 / 私网 / 链路本地 / IPv6 ULA，
+  只有 `allow_local_servers` 打开才允许内网联机；服务端探测走同一套规则。
+- **自定义皮肤**：CSL（CustomSkinLoader）mod 经 Modrinth 镜像自动安装并写好指向 `{base}/skin/` 的配置；
+  服务端 `/skin` 托管皮肤 PNG（Pillow 校验尺寸 64×64 / 64×32、64 KiB 上限、原子落盘）；客户端上传前用
+  Pillow 判 `classic/slim` 并裁 8×8 头像替换启动页头像。预留 `AccountProvider` 抽象与 `-javaagent` 注入位，
+  供后续接外置登录（LittleSkin / authlib-injector）。
+- **启动提速**：Java 探测磁盘缓存、natives 与 classpath 并行、版本解析 LRU、页面懒构建（首屏只造启动页）、
+  分段启动埋点；已安装实例的启动路径保持零网络。
+- **插件接口雏形**：仅官方内置插件 + capability 白名单，禁止动态加载第三方代码；示例官方插件 `diagnostics`
+  在设置页输出「连通性自检」卡片，插件页渲染已加载的官方插件。
+- **Web 可视化看板**：`server/page`（Vue 3 + Vite + vue-router，仅这两个运行时依赖、图表自绘 SVG）的构建产物
+  由镜像服务在 `/page` 直出，含概览 / 缓存 / 下载热度 / 联机 / 皮肤五个页面；`dist` 缺失时 `/page` 返回 404，
+  不影响其它路由。
+
 ```bash
 cd user
 python main.py                     # 需要 PyQt6
@@ -132,7 +153,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging\build_installer.ps
 #         启动的进程写不了 C 盘，安装器会直接弹框说明而不是静默失败
 ```
 
-当前版本：`0.5.4`（`user`、`user-*` 分支）。
+当前版本：`0.6.0`（`user`、`user-*` 分支）。
 
 配置默认在 `%APPDATA%\CrMCDownload\config.json`。
 
@@ -146,7 +167,9 @@ curl http://127.0.0.1:8081/health
 ```
 
 路由：`/meta` `/data` `/libs` `/assets` `/fabric` `/fabricmaven` `/forgemaven` `/neoforgemaven`
-`/modrinth` `/modcdn`，另带 `/health` 与 `/metrics`。带查询串的请求（如 Modrinth 搜索）会完整转发并以 `.q<sha1>` 区分缓存；
+`/modrinth` `/modcdn`，另带 `/health` 与 `/metrics`；0.6.0 新增 `/api/servers/*`、`/api/stats/*`、`/api/skins/status`
+（联机榜单与看板数据，读接口免令牌）、`/skin/<name>.png`（皮肤托管）与 `/page`（Web 看板静态资源）。
+带查询串的请求（如 Modrinth 搜索）会完整转发并以 `.q<sha1>` 区分缓存；
 maven 路由下的 `*.xml` 索引按元数据 TTL 缓存，jar 长期缓存。
 
 生产部署见 `server-deploy` 分支的 `DEPLOY.md`（systemd / Docker / nginx / Caddy），
@@ -155,7 +178,7 @@ maven 路由下的 `*.xml` 索引按元数据 TTL 缓存，jar 长期缓存。
 ## 技术栈
 
 - Python 3.12 + uv
-- 客户端 GUI：PyQt6（唯一第三方运行期依赖）
+- 客户端 GUI：PyQt6；皮肤校验 / 头像：Pillow（第三方运行期依赖）
 - 服务端：标准库 `ThreadingHTTPServer`，可选 nginx/Caddy 反代
 - 打包：PyInstaller（onedir 文件夹分发，免运行期解压）
 
