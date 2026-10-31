@@ -582,6 +582,8 @@ class MainWindow(QMainWindow):
         self._plugin_nav_items: list[tuple[str, str, Callable[[], Any]]] = []
         self.plugin_registry = PluginRegistry(self.data_dir, host=_PluginHost(self))
         self.plugin_registry.load()
+        #: 离线联机「进入」面板（插件页卡片打开时持有，退出时清理会话）
+        self._offline_panel: Any = None
 
         self.setWindowTitle(APP_NAME)
         self.setWindowIcon(QIcon(block_pixmap("crmcdownload", 64)))
@@ -1331,7 +1333,11 @@ class MainWindow(QMainWindow):
             if item.widget() is not None:
                 item.widget().deleteLater()
         records = self.plugin_registry.records
+        # 离线联机作为特权插件：置顶专用卡片（状态机），不重复进通用插件卡列表
+        layout.insertWidget(layout.count() - 1, self._make_offline_mp_card())
         for record in records:
+            if record.manifest.id == "offline-multiplayer":
+                continue
             layout.insertWidget(layout.count() - 1, self._make_plugin_card(record))
         tone = "green" if any(r.status == "loaded" for r in records) else "gray"
         self.plugin_badge.set(f"官方 · {len(records)} 个", tone)
@@ -1384,6 +1390,143 @@ class MainWindow(QMainWindow):
         else:
             self.notice("该插件当前不可切换", "WARN")
         self._rebuild_official_plugins()
+
+    # -------------------------------------------------- 离线联机特权插件卡片
+    def _make_offline_mp_card(self) -> QWidget:
+        """插件页顶部专用卡片：未下载 / 已装未启用 / 已启用 三态，入口只在此。"""
+        from offcraft.plugins import bundle
+
+        card = Card()
+        top = QHBoxLayout()
+        name = QLabel("离线联机")
+        name.setStyleSheet("font-size: 11pt; font-weight: 700;")
+        top.addWidget(name)
+        installed = bundle.is_installed(self.data_dir)
+        record = self.plugin_registry.get(bundle.PLUGIN_ID)
+        if not installed:
+            state, tone = "未下载", "gray"
+        elif record is not None and record.status == "loaded":
+            state, tone = "已启用", "green"
+        elif record is not None and record.status == "error":
+            state, tone = "加载失败", "red"
+        else:
+            state, tone = "已装未启用", "amber"
+        top.addWidget(Badge(state, tone))
+        top.addWidget(Badge("官方 · 特权", "purple"))
+        top.addStretch(1)
+        if not installed:
+            download = QPushButton("下载")
+            download.setObjectName("primary")
+            download.setMinimumHeight(30)
+            download.clicked.connect(self._download_offline_mp)
+            top.addWidget(download)
+        elif record is not None and record.status == "loaded":
+            enter = QPushButton("进入")
+            enter.setObjectName("primary")
+            enter.setMinimumHeight(30)
+            enter.clicked.connect(self._open_offline_mp)
+            disable = QPushButton("停用")
+            disable.setObjectName("ghost")
+            disable.setMinimumHeight(30)
+            disable.clicked.connect(lambda _c=False: self._set_offline_enabled(False))
+            top.addWidget(enter)
+            top.addWidget(disable)
+        else:
+            enable = QPushButton("启用")
+            enable.setObjectName("primary")
+            enable.setMinimumHeight(30)
+            enable.clicked.connect(lambda _c=False: self._set_offline_enabled(True))
+            redownload = QPushButton("重新下载")
+            redownload.setObjectName("ghost")
+            redownload.setMinimumHeight(30)
+            redownload.clicked.connect(self._download_offline_mp)
+            top.addWidget(enable)
+            top.addWidget(redownload)
+        card.add_layout(top)
+        desc = QLabel(
+            "把不同局域网的设备拉进同一虚拟房间（端到端加密，经服务端中继只见密文）。"
+            "按需下载，基础安装包不附带；启用后方可创建/开放/加入房间。"
+        )
+        desc.setObjectName("muted")
+        desc.setWordWrap(True)
+        card.add(desc)
+        card.add(self._label("能力：net.tunnel（仅官方特权，第三方不可得）", "mutedSmall"))
+        if record is not None and record.error:
+            err = QLabel(record.error)
+            err.setStyleSheet(f"color: {DANGER}; font-size: 8.5pt;")
+            err.setWordWrap(True)
+            card.add(err)
+        return card
+
+    def _reload_offline_registry(self) -> None:
+        from offcraft.plugins import bundle
+
+        if self.plugin_registry.get(bundle.PLUGIN_ID) is None:
+            self.plugin_registry.reload()
+
+    def _set_offline_enabled(self, enabled: bool) -> None:
+        from offcraft.plugins import bundle
+
+        if not bundle.is_installed(self.data_dir):
+            self.notice("请先下载离线联机插件。", "WARN")
+            return
+        self._reload_offline_registry()
+        if self.plugin_registry.set_enabled(bundle.PLUGIN_ID, enabled):
+            self.notice(("已启用 离线联机" if enabled else "已停用 离线联机"), "INFO")
+        else:
+            self.notice("插件当前不可切换（可能完整性校验失败）", "WARN")
+        self._rebuild_official_plugins()
+
+    def _open_offline_mp(self) -> None:
+        """「进入」：把离线联机面板包成对话框打开（会话随对话框关闭清理）。"""
+        from offcraft.ui.p2p_panel import P2PPanel
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("离线联机")
+        dialog.resize(u(44), u(32))
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(0, 0, 0, 0)
+        panel = P2PPanel(self)
+        layout.addWidget(panel)
+        self._offline_panel = panel
+        try:
+            dialog.exec()
+        finally:
+            try:
+                panel.shutdown()
+            except Exception:  # noqa: BLE001 - 清理尽力而为
+                pass
+            self._offline_panel = None
+
+    def _download_offline_mp(self) -> None:
+        """后台拉取服务端发布的插件包：先校 zip sha256 再解包落地，然后刷新卡片。"""
+        from offcraft.plugins import bundle
+
+        base = (self.config.download_base or "").rstrip("/")
+        if not base:
+            self.notice("未配置下载源，无法下载离线联机插件。", "WARN")
+            return
+        self.notice("正在下载离线联机插件……", "INFO")
+
+        def worker() -> None:
+            try:
+                downloader = self.make_downloader(progress=False)
+                manifest = downloader.fetch_json(base + bundle.MANIFEST_PATH) or {}
+                zip_bytes = downloader.fetch_bytes(base + bundle.ZIP_PATH)
+                bundle.install_zip(
+                    self.data_dir, zip_bytes,
+                    expected_sha256=str(manifest.get("sha256") or ""),
+                    abi=str(manifest.get("abi") or ""),
+                )
+                self.plugin_registry.reload()
+                self.post(lambda: (self._rebuild_official_plugins(),
+                                   self.notice("离线联机插件已下载，点「启用」开始使用。", "INFO")))
+            except Exception as exc:  # noqa: BLE001 - 下载/校验失败不阻断 UI
+                message = f"下载失败：{exc}"
+                self.post(lambda m=message: self.notice(m, "WARN"))
+                self.post(lambda: self._rebuild_official_plugins())
+
+        threading.Thread(target=worker, name="plugin-offline-dl", daemon=True).start()
 
     def _refresh_plugins_page(self) -> None:
         if self.pages.get("plugins") is not None:
@@ -3025,6 +3168,17 @@ class MainWindow(QMainWindow):
                 return
             self.process.stop()
         self._timer.stop()
+        panel = getattr(self, "_offline_panel", None)
+        if panel is not None:
+            try:
+                panel.shutdown()
+            except Exception:  # noqa: BLE001 - 清理尽力而为，不阻断退出
+                pass
+        # 经插件注册表遍历 teardown（离线联机会话由其插件实例负责关停）
+        try:
+            self.plugin_registry.unload_all()
+        except Exception:  # noqa: BLE001
+            pass
         event.accept()
 
 

@@ -18,6 +18,7 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QPushButton,
     QScrollArea,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -262,8 +263,11 @@ class OnlinePage(QWidget):
         self.list_layout.addStretch(1)
         self.scroll.setWidget(host)
 
+        self.stack = QStackedWidget()
+        self.stack.addWidget(self.scroll)
+
         layout.addWidget(left)
-        layout.addWidget(self.scroll, 1)
+        layout.addWidget(self.stack, 1)
         self.set_section("hot")
 
     # ---------------------------------------------------------------- 数据
@@ -279,6 +283,7 @@ class OnlinePage(QWidget):
         self._section = name
         for key, button in self.section_buttons.items():
             button.setChecked(key == name)
+        self.stack.setCurrentWidget(self.scroll)
         self._rebuild()
 
     def _directory(self) -> ServerDirectory:

@@ -37,6 +37,7 @@ CAPABILITIES: frozenset[str] = frozenset(
         "runtime.task",       # 提交后台任务
         "instance.list",      # 只读实例列表
         "net.mirror_fetch",   # 经镜像改写 + trust 校验的下载
+        "net.tunnel",         # 离线联机特权：放行端到端加密隧道（**仅官方插件**可声明）
         "mirror.ping",        # 诊断：连通性探测聚合
     }
 )
@@ -75,6 +76,9 @@ class PluginManifest:
             raise PluginError(
                 f"插件 {self.id} 声明了未授权能力：{', '.join(sorted(unknown))}"
             )
+        # net.tunnel 是特权能力：只有官方插件可声明（第三方动态加载始终禁止）
+        if "net.tunnel" in self.capabilities and not self.official:
+            raise PluginError(f"插件 {self.id} 非官方，不得声明特权能力 net.tunnel")
 
 
 @runtime_checkable

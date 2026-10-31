@@ -126,3 +126,14 @@ class PluginContext:
         if not path.startswith("/") or "//" in path or ".." in path:
             raise PluginError(f"非法探测路径：{path!r}")
         return self._host.mirror_probe(path)
+
+    # -- 离线联机特权（net.tunnel）-----------------------------------
+    def p2p_open_tunnel(self) -> bool:
+        """特权声明位：仅 ``net.tunnel``（官方插件）可调用，返回「允许联网」标记。
+
+        离线联机引擎用标准库 ``socket`` 直连中继（数据面端到端加密，服务端只见密文）；
+        本访问器不给插件任何宿主网络对象，只作为宿主识别特权插件、放行并展示入口的
+        声明凭证——非官方 / 未声明能力一律拒绝。
+        """
+        self._require("net.tunnel")
+        return True

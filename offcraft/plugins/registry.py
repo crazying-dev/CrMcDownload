@@ -10,14 +10,17 @@
 from __future__ import annotations
 
 import importlib
+import importlib.util
 import json
 import os
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from offcraft.config import config_dir
 from offcraft.plugins.base import PLUGIN_API, Plugin, PluginError, PluginManifest
+from offcraft.plugins.bundle import BundleError, MANIFEST_FILE, read_manifest, verify_bundle
 from offcraft.plugins.context import PluginContext, PluginHost
 
 __all__ = ["PluginRecord", "PluginRegistry"]
@@ -97,8 +100,21 @@ class PluginRegistry:
                 pass
 
     # -- 发现与加载 ----------------------------------------------------
+    def reload(self) -> list[PluginRecord]:
+        """重新扫描内置 + 已下载插件（用于插件下载/卸载后刷新）。
+
+        先卸载现有实例并清除已下载入口模块缓存，再重新发现——保证新落地的
+        bundle 能被扫到、旧的能被替换。
+        """
+        self.unload_all()
+        for name in [n for n in sys.modules if n.startswith("_offcraft_plugin_")]:
+            sys.modules.pop(name, None)
+        self.records = []
+        self._loaded = False
+        return self.load()
+
     def load(self) -> list[PluginRecord]:
-        """一次性发现并加载内置插件（幂等）。"""
+        """一次性发现并加载内置 + 已下载官方插件（幂等）。"""
         if self._loaded:
             return self.records
         self._loaded = True
@@ -115,7 +131,66 @@ class PluginRegistry:
                 self._add_error(module_name, "缺少 MANIFEST 或 create()")
                 continue
             self._register(module, manifest, factory)
+        self._load_downloaded()
         return self.records
+
+    # -- 已下载官方插件（按需加载）--------------------------------
+    def _load_downloaded(self) -> None:
+        """扫描 ``config_dir()/plugins/<id>/`` 下带 manifest.json 的第一方 bundle。
+
+        仅扫描本程序自己写入的插件目录，且加载前逐文件校验 sha256（见
+        :mod:`offcraft.plugins.bundle`）——校验不过绝不 import，第三方动态加载始终禁止。
+        """
+        base = config_dir(self.data_dir) / "plugins"
+        if not base.is_dir():
+            return
+        for child in sorted(base.iterdir()):
+            if not child.is_dir() or not (child / MANIFEST_FILE).is_file():
+                continue
+            self._register_bundle(child)
+
+    def _register_bundle(self, directory: Path) -> None:
+        plugin_id = directory.name
+        if not verify_bundle(self.data_dir, plugin_id):
+            self._add_error(plugin_id, "插件完整性校验失败（文件与安装记录不符，已拒绝加载）")
+            return
+        try:
+            meta = read_manifest(self.data_dir, plugin_id)
+        except (BundleError, OSError, ValueError) as exc:
+            self._add_error(plugin_id, f"清单解析失败：{exc}")
+            return
+        entry = str(meta.get("entry") or "plugin_main.py")
+        module = self._import_entry(directory, plugin_id, entry)
+        if module is None:
+            return
+        manifest = getattr(module, "MANIFEST", None)
+        factory = getattr(module, "create", None)
+        if not isinstance(manifest, PluginManifest) or not callable(factory):
+            self._add_error(plugin_id, "入口缺少 MANIFEST 或 create()")
+            return
+        # 下载后的官方插件默认不自动启用（由插件页卡片状态机控制）
+        self._register(module, manifest, factory, default_enabled=False)
+
+    def _import_entry(self, directory: Path, plugin_id: str, entry_file: str):
+        path = directory / entry_file
+        if not path.is_file():
+            self._add_error(plugin_id, f"入口文件缺失：{entry_file}")
+            return None
+        module_name = f"_offcraft_plugin_{plugin_id}"
+        sys.path.insert(0, str(directory))  # 让 bundle 内的引擎/依赖可被 import
+        try:
+            spec = importlib.util.spec_from_file_location(module_name, path)
+            if spec is None or spec.loader is None:
+                self._add_error(plugin_id, "无法构建模块规格")
+                return None
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[module_name] = module
+            spec.loader.exec_module(module)
+        except Exception as exc:  # noqa: BLE001 - bundle 坏了不阻断
+            sys.modules.pop(module_name, None)
+            self._add_error(plugin_id, f"入口加载失败：{exc}")
+            return None
+        return module
 
     def _add_error(self, module_name: str, message: str) -> None:
         stub = PluginManifest(
@@ -127,8 +202,9 @@ class PluginRegistry:
         )
         self.records.append(PluginRecord(manifest=stub, status="error", error=message))
 
-    def _register(self, module, manifest: PluginManifest, factory) -> None:
-        enabled = bool(self._enabled.get(manifest.id, manifest.official))
+    def _register(self, module, manifest: PluginManifest, factory, *, default_enabled=None) -> None:
+        fallback = manifest.official if default_enabled is None else default_enabled
+        enabled = bool(self._enabled.get(manifest.id, fallback))
         try:
             manifest.validate()
         except PluginError as exc:

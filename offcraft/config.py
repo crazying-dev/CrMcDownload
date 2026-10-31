@@ -63,6 +63,14 @@ class Config:
     skin_model: str = "auto"
     #: 账户提供者（本次仅 ``offline``；预留给外置登录）
     account_provider: str = "offline"
+    #: 离线联机（P2P）：默认关闭，需显式开启（特权插件，走端到端加密隧道）
+    p2p_enabled: bool = False
+    #: 中继端口：0 = 由服务端下发（信令响应里携带）；非 0 仅作本地覆盖预留
+    p2p_relay_port: int = 0
+    #: 上次使用的房间名（仅标识；密码改由机器绑定加密存于插件存储）
+    p2p_last_room: str = ""
+    #: 稳定设备标识（首启生成）：服务端每设备房间配额的软锚点；重装/清配置会重置
+    p2p_device_id: str = ""
 
     def to_json(self) -> dict[str, Any]:
         return asdict(self)
@@ -87,6 +95,13 @@ class Config:
             self.account_provider = "offline"
         if not self.username:
             self.username = "Player"
+        self.p2p_relay_port = max(0, min(65535, int(self.p2p_relay_port)))
+        self.p2p_last_room = (self.p2p_last_room or "").strip()[:64]
+        # 设备标识：缺失/非法则生成一个稳定的 32 位 hex（首启落盘后不再变）
+        if not (8 <= len(self.p2p_device_id or "") <= 64
+                and all(c in "0123456789abcdef" for c in (self.p2p_device_id or ""))):
+            import secrets
+            self.p2p_device_id = secrets.token_hex(16)
 
     def apply_version_overrides(self, version_id: str) -> dict[str, Any]:
         data = asdict(self)
