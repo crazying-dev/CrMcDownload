@@ -123,6 +123,47 @@ curl -s -o /dev/null -w '%{http_code}\n' "https://mc.yjlt.top/forgemaven/net/min
 - 磁盘写满时自动清临时文件并压缩缓存到上限的一半，不影响正在传输的响应；
 - `/health` 会返回缓存用量（`cache.bytes` / `cache.max_bytes` / 淘汰与回收累计值）。
 
+## 6. 联机 / 皮肤 / Web 看板（0.6.0）
+
+镜像服务除代理上游文件外，还**自身提供**三类端点（不走上游代理、无需额外 nginx 规则，`/api` `/skin` `/page`
+经同一 `server {}` 反代即可）：
+
+| 端点 | 说明 |
+| --- | --- |
+| `/api/servers/*`、`/api/stats/*`、`/api/skins/status` | 联机榜单与看板数据（读免令牌） |
+| `/api/servers/report`（POST）、`/skin/<name>.png`（POST） | 写接口，需 `X-OffCraft-Token` |
+| `/page`、`/page/<asset>` | Web 可视化看板静态产物（Vue3 构建的 `dist`） |
+
+### 6.1 构建 Web 看板
+
+看板需在**有 node + pnpm 的机器**（本机或 CI）构建，产物目录 `server/page/dist` 由 `MIRROR_PAGE_DIR` 指向：
+
+```bash
+cd page
+pnpm install
+pnpm build          # 产出 page/dist（base=/page/）
+```
+
+未构建时 `/page` 返回 404，不影响其它路由（看板是可选功能）。开发态可用 `pnpm dev`（`vite.config.ts` 已把
+`/api`、`/health` 代理到 `127.0.0.1:8081`）。
+
+### 6.2 新增环境变量与持久化
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `MIRROR_DB_PATH` | `./data/mirror.db` | 联机 SQLite（WAL，会产生 `-wal`/`-shm` 旁文件） |
+| `MIRROR_POPULAR_DATA` | `./data/popular_servers.json` | 榜单为空时导入的种子（人工维护） |
+| `MIRROR_SKINS_DIR` | `./skins` | 皮肤文件根目录 |
+| `MIRROR_PAGE_DIR` | `./page/dist` | 看板构建产物目录 |
+| `MIRROR_SERVER_PROBE_INTERVAL` | `300` | 后台批量探测间隔（秒） |
+| `MIRROR_SERVER_PROBE_ENABLE` | `on` | 关闭则不启动探测线程 |
+
+- **持久化与备份**：systemd 把工作目录设在 `/var/lib/offcraft-mirror` 时，`.env` 里把上述路径改为该目录下的绝对路径
+  （如 `MIRROR_DB_PATH=/var/lib/offcraft-mirror/data/mirror.db`、`MIRROR_SKINS_DIR=/var/lib/offcraft-mirror/skins`）；
+  Docker 部署需为 `./data` 与 `./skins` 挂载持久卷，否则容器重建会丢失热度榜与已上传皮肤。
+- **回滚 / 停止**：探测线程跑在独立事件循环里，`systemctl stop` / `Ctrl-C` 会 `loop.close()` + 线程 join 后干净退出；
+- 皮肤上传上限 64 KiB、尺寸仅 `64×64` / `64×32`（Pillow 校验），非 PNG 或尺寸不符返回中文错误。
+
 ## 备选：无子域名（独立端口）
 
 若暂时不能加 DNS，可让 Caddy 监听 `:8443` 并自签/使用已有证书：
