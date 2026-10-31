@@ -78,6 +78,18 @@ class Settings:
     probe_interval: int = 300
     #: 是否启用后台探测
     probe_enable: bool = True
+    #: 离线联机（P2P）：是否启用信令 + 中继子系统
+    p2p_enable: bool = False
+    #: 中继数据面监听端口（TCP；控制面走主 HTTP 端口的 /p2p）
+    p2p_relay_port: int = 25577
+    #: 中继对外通告地址（空则回落 settings.host，供客户端连回中继）
+    p2p_relay_host: str = ""
+    #: 同时在途的房间上限（内存态，防滥用）
+    p2p_max_rooms: int = 256
+    #: 房间/成员空闲多久后被回收（秒）
+    p2p_room_ttl: int = 180
+    #: 单条中继连接累计转发字节上限（超限断开，避免沦为开放中继）
+    p2p_relay_bytes_cap: int = 512 * 1024 * 1024
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> "Settings":
@@ -107,6 +119,13 @@ class Settings:
             probe_interval=_int(env, "MIRROR_SERVER_PROBE_INTERVAL", 300),
             probe_enable=(env.get("MIRROR_SERVER_PROBE_ENABLE", "on").strip().lower()
                           not in ("0", "false", "no", "off")),
+            p2p_enable=(env.get("MIRROR_P2P_ENABLE", "").strip().lower()
+                        in ("1", "true", "yes", "on")),
+            p2p_relay_port=_int(env, "MIRROR_P2P_RELAY_PORT", 25577),
+            p2p_relay_host=(env.get("MIRROR_P2P_RELAY_HOST", "").strip()),
+            p2p_max_rooms=_int(env, "MIRROR_P2P_MAX_ROOMS", 256),
+            p2p_room_ttl=_int(env, "MIRROR_P2P_ROOM_TTL", 180),
+            p2p_relay_bytes_cap=_int(env, "MIRROR_P2P_RELAY_BYTES_CAP", 512 * 1024 * 1024),
         )
 
     @property

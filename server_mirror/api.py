@@ -41,6 +41,7 @@ class ApiRouter:
     db: Database
     skins: SkinStore | None = None
     page: Any = None                       # StaticHandler
+    p2p: Any = None                        # SignalingRouter（离线联机信令）
     metrics_snapshot: Callable[[], dict] | None = None
     cache_stats: Callable[[], dict] | None = None
     probe_status: Callable[[], dict] | None = None
@@ -52,6 +53,7 @@ class ApiRouter:
         return (
             clean.startswith("/api/")
             or clean.startswith("/skin/")
+            or clean.startswith("/p2p/")
             or clean == "/page"
             or clean.startswith("/page/")
         )
@@ -65,7 +67,8 @@ class ApiRouter:
 
     # -------------------------------------------------------------- 分发
     def dispatch(
-        self, method: str, target: str, headers: dict[str, str], body: bytes | None = None
+        self, method: str, target: str, headers: dict[str, str], body: bytes | None = None,
+        client: Any = None,
     ) -> tuple[int, dict[str, str], bytes]:
         raw_path, _, query = target.partition("?")
         path = unquote(raw_path)
@@ -74,6 +77,8 @@ class ApiRouter:
             return self._serve_page(path)
         if path.startswith("/skin/"):
             return self._serve_skin(method, path, params, headers, body)
+        if path.startswith("/p2p/"):
+            return self._serve_p2p(method, path, headers, body, client)
         if path.startswith("/api/"):
             return self._serve_api(method, path, params, headers, body)
         return _err(404, "未知接口")
@@ -82,6 +87,19 @@ class ApiRouter:
         if self.page is None or not getattr(self.page, "available", False):
             return _err(404, "看板未构建")
         return self.page.serve(path)
+
+    # --------------------------------------------------------------- /p2p
+    def _serve_p2p(self, method: str, path: str, headers: dict[str, str], body, client):
+        """离线联机控制面：POST-only，凭证独立于全局下载令牌（靠 proof 准入）。"""
+        if self.p2p is None:
+            return _err(404, "离线联机未启用")
+        if method != "POST":
+            return _err(405, "方法不允许")
+        payload = _decode_json(body)
+        if payload is None:
+            return _err(400, "请求体不是合法 JSON")
+        status, data = self.p2p.handle(path, payload, client)
+        return _json(status, data)
 
     # --------------------------------------------------------------- /api
     def _serve_api(self, method: str, path: str, params: dict[str, str], headers: dict[str, str], body):

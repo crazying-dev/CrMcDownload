@@ -73,6 +73,7 @@ class MirrorHTTPServer(ThreadingHTTPServer):
         router=None,
         db=None,
         probe=None,
+        relay=None,
     ) -> None:
         super().__init__(address, MirrorHandler)
         self.settings = settings
@@ -86,6 +87,7 @@ class MirrorHTTPServer(ThreadingHTTPServer):
         self.router = router
         self.db = db
         self.probe = probe
+        self.relay = relay
         self.upstream_slots = (
             threading.BoundedSemaphore(settings.max_upstreams)
             if settings.max_upstreams > 0
@@ -95,6 +97,8 @@ class MirrorHTTPServer(ThreadingHTTPServer):
     def server_close(self) -> None:  # noqa: D401 - 停后台线程并关库
         if self.probe is not None:
             self.probe.stop()
+        if self.relay is not None:
+            self.relay.stop()
         if self.db is not None:
             self.db.close()
         super().server_close()
@@ -126,7 +130,9 @@ class MirrorHandler(BaseHTTPRequestHandler):
                 self._json(413, {"error": "body too large"})
                 return
             body = self.rfile.read(length)
-            status, headers, out = router.dispatch("POST", self.path, dict(self.headers.items()), body)
+            status, headers, out = router.dispatch(
+                "POST", self.path, dict(self.headers.items()), body, client=self.client_address
+            )
             self._respond(status, headers, out, head_only=False)
             return
         self._json(405, {"error": "method not allowed"})
@@ -154,7 +160,9 @@ class MirrorHandler(BaseHTTPRequestHandler):
         router = self.server.router
         if router is not None and router.handles(self.path):
             method = "HEAD" if head_only else self.command
-            status, headers, body = router.dispatch(method, self.path, dict(self.headers.items()), None)
+            status, headers, body = router.dispatch(
+                method, self.path, dict(self.headers.items()), None, client=self.client_address
+            )
             self._respond(status, headers, body, head_only)
             return
         if not self._authorized():
