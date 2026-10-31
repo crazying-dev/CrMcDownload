@@ -4,18 +4,21 @@ Minecraft 启动器客户端：从自建镜像下载游戏版本、模组、整�
 
 ## 界面
 
-顶部固定导航栏（68 px，启动 / 下载 / 设置 / 插件）+ 下方内容区；窗口长宽比 3:2（默认 1200×800，最小 1080×720）：
+顶部固定导航栏（启动 / 联机 / 下载 / 设置 / 插件）+ 下方内容区；窗口长宽比 3:2（默认 1200×800，最小 1080×720）：
 
 - **启动游戏**：账号行（头像 / 用户名 / 切换账号）、版本大图上位卡（加载器与 MC 版本徽章、版本元信息）、
   内存分配滑块（1–32 GB）、「启动游戏」主按钮、版本设置 / 打开目录；右侧版本列表
   （版本 / 加载器 / 大小 / 最近使用；右键：启动、版本设置、**安装加载器…**、打开游戏目录、打开版本目录、删除实例）
   与 6 个快捷入口磁贴。
+- **联机大厅**（0.6.0）：热门榜（服务端热度）/ 我的收藏 / 最近访问三分区，每卡显示 favicon / MOTD /
+  版本徽章 / 在线人数 / 延迟三档徽章，支持刷新、复制地址、详情、加入游戏（≥1.20.2 直连，否则复制地址）。
 - **下载中心**：游戏版本（正式版 / 快照 / 远古版 / 已安装 四个分段，支持搜索与「安装最新版」）、
   模组、整合包、资源包、光影（Modrinth 搜索 → 详情 → 版本 → 一键安装）、**Java**
   （Mojang 官方 java-runtime 列表，可下载并设为启动 Java）。
   目标目录下拉末尾是「选择文件夹…」，可直接把任意文件夹（例如已有的 `.minecraft`）当作安装目标，
   取消选择会回到上一次的有效目录。
-- **插件**：市场 / 官方 / 社区 / 其他 / 已下载 五个分类的框架页，插件 API 尚未接入。
+- **插件**（0.6.0）：仅渲染官方内置插件（capability 白名单、不动态加载第三方代码）；示例插件 `diagnostics`
+  在设置页输出「连通性自检」卡片；市场 / 社区 / 其他分区保留框架。
 - **设置**：游戏目录、版本隔离、跳过资源校验、Java 选择（自动检测 / 手动添加）、内存、额外 JVM 参数、
   下载时是否在镜像与直连之间自动择优；下载源地址不在界面上展示，只能按 **F12** 打开「下载源设置」。
 - 底部任务面板（标题 / 阶段 / 详情 / 进度条 / 取消）与状态栏（连接状态灯、实例与文件计数）。
@@ -67,6 +70,21 @@ Minecraft 启动器客户端：从自建镜像下载游戏版本、模组、整�
   再解压 `overrides/`，最后写入 `offcraft-pack.json` 记录来源与文件数。
 - **限制**：Forge / NeoForge 整合包需要先有对应加载器实例，安装器不会由整合包自动触发。
 
+## 联机与皮肤（0.6.0）
+
+- **联机探测**：`offcraft/servers/ping.py` 用标准库 socket 实现 Server List Ping（变长整数、Handshake →
+  Login Start → JSON Response），解析延迟 / MOTD（含 `extra` 递归与颜色码剥离）/ 版本 / 在线人数 / 玩家列表 /
+  favicon；探活走后台线程，主线程不阻塞。热度榜来自服务端 `/api/servers/*`。
+- **SSRF 护栏**：`offcraft/servers/ssrf.py` 解析 `host[:port]` 并拒绝回环 / 私网 / 链路本地 / IPv6 ULA；
+  默认 `allow_local_servers=false`，打开后才允许内网联机（客户端主动连任意服是有意例外，靠护栏兜底）。
+- **自定义皮肤**：启动时自动为带加载器的实例安装 CSL（`offcraft/skins/csl.py`），并把皮肤源指向
+  `{base}/skin/`；选图上传（`upload.py`）前用 Pillow 校验并自动判 `classic/slim`，上传走 token-origin 规则；
+  `avatar.py` 从皮肤裁 8×8 头像替换启动页头像。未配下载源时皮肤入口置灰。
+- **外置登录预留**：`offcraft/account/` 定义 `AccountProvider` / `LaunchAccount` 与 `OfflineAccount`，启动命令
+  支持 `-javaagent=` 注入；本次不实现账户服务，后续接 LittleSkin / authlib-injector 只需新增 provider。
+- 配置新增字段：`skin_enabled`（默认 true）、`skin_model`（`auto|classic|slim`）、`account_provider`（默认 `offline`）、
+  `allow_local_servers`（默认 false）。
+
 ## 版本隔离
 
 `config.json` 的 `isolation` 默认 `true`：每个版本以 `versions/<id>/` 作为游戏目录，
@@ -78,6 +96,7 @@ Minecraft 启动器客户端：从自建镜像下载游戏版本、模组、整�
 - Windows 10/11 x64
 - Python 3.12
 - PyQt6（`pip install PyQt6`）
+- Pillow（`pip install Pillow`，皮肤校验与头像裁切）
 - [uv](https://docs.astral.sh/uv/) 0.12+（可选，用于环境与测试）
 
 ## 运行

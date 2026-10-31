@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import os
 import queue
+import re
 import shutil
 import sys
 import threading
@@ -78,6 +79,7 @@ from offcraft.content.target import (
     target_state,
 )
 from offcraft.content.modrinth import ModrinthClient, ProjectHit, ProjectVersion
+from offcraft.account import get_provider
 from offcraft.instances import (
     Instance,
     discover_instances,
@@ -86,16 +88,19 @@ from offcraft.instances import (
     rename_instance,
     safe_instance_id,
 )
-from offcraft.launch.auth import make_profile, validate_name
+from offcraft.launch.auth import validate_name
 from offcraft.launch.command import LaunchError, LaunchOptions, build_command
-from offcraft.launch.java import list_java, probe_java
+from offcraft.launch.java import export_java_cache, list_java, prime_java_cache, probe_java
 from offcraft.launch.process import GameProcess
 from offcraft.meta.manifest import VersionManifest, VersionSummary
 from offcraft.meta.version import load_version
 from offcraft.net.downloader import Downloader, ProgressTracker
 from offcraft.net.latency import make_source
+from offcraft.plugins.registry import PluginRegistry
 from offcraft.ui.content_page import ContentPage
 from offcraft.ui.install_page import InstallPage
+from offcraft.ui.online_page import OnlinePage
+from offcraft.ui.skin_page import SkinPage
 from offcraft.ui.theme import (
     DANGER,
     OK,
@@ -117,9 +122,10 @@ CONTENT_TABS = [
     ("shader", "光影"),
 ]
 
-#: 顶部导航（顺序：启动 → 下载 → 设置 → 插件）
+#: 顶部导航（顺序：启动 → 联机 → 下载 → 设置 → 插件）
 NAV_ITEMS = [
     ("home", "启动"),
+    ("online", "联机"),
     ("download", "下载"),
     ("settings", "设置"),
     ("plugins", "插件"),
@@ -552,6 +558,8 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.config = config
         self.data_dir = data_dir
+        # Java 探测磁盘缓存预热：避免每次启动都遍历安装目录 + spawn java -version
+        prime_java_cache(getattr(config, "java_cache", None))
         self.events: queue.Queue[tuple[str, Any]] = queue.Queue()
         self.manifest: VersionManifest | None = None
         self.instances: list[Instance] = []
@@ -570,6 +578,10 @@ class MainWindow(QMainWindow):
         self._version_rows: list[VersionSummary] = []
         #: 下载源缓存（按 base/proxy/择优开关 区分），保留探测结论避免重复测时
         self._sources: dict[str, Any] = {}
+        #: 官方内置插件注册表：host 适配器把宿主原语受限地递给插件
+        self._plugin_nav_items: list[tuple[str, str, Callable[[], Any]]] = []
+        self.plugin_registry = PluginRegistry(self.data_dir, host=_PluginHost(self))
+        self.plugin_registry.load()
 
         self.setWindowTitle(APP_NAME)
         self.setWindowIcon(QIcon(block_pixmap("crmcdownload", 64)))
@@ -630,20 +642,35 @@ class MainWindow(QMainWindow):
         root.addWidget(self.topbar)
 
         self.stack = QStackedWidget()
-        self.pages: dict[str, QWidget] = {
-            "home": self._build_home_page(),
-            "download": self._build_download_page(),
-            "plugins": self._build_plugins_page(),
-            "settings": self._build_settings_page(),
+        # 页面懒构建：首屏只造「启动」页，其余页首次切入时才构建（降低启动耗时）
+        self._page_factories: dict[str, Callable[[], QWidget]] = {
+            "home": self._build_home_page,
+            "online": self._build_online_page,
+            "download": self._build_download_page,
+            "settings": self._build_settings_page,
+            "plugins": self._build_plugins_page,
         }
-        for page in self.pages.values():
-            self.stack.addWidget(page)
+        self.pages: dict[str, QWidget] = {}
         root.addWidget(self.stack, 1)
 
         # 版本号（右下）、下载源（左下）、任务面板（浮层）都不占内容区高度
         self._build_overlays()
+        self._ensure_page("home")
         self.show_page("home")
         self._place_overlays()
+
+    def _ensure_page(self, name: str) -> QWidget | None:
+        """按需构建并返回页面；已构建则直接返回。"""
+        page = self.pages.get(name)
+        if page is not None:
+            return page
+        factory = self._page_factories.get(name)
+        if factory is None:
+            return None
+        page = factory()
+        self.pages[name] = page
+        self.stack.addWidget(page)
+        return page
 
     def _build_topbar(self) -> QWidget:
         """顶部菜单栏（5k）：logo 在左，四项导航居中，右侧显示当前状态。"""
@@ -761,14 +788,26 @@ class MainWindow(QMainWindow):
         panel.add(self.launch_button)
 
         panel.body.addSpacing(u(0.75))
+        # 左栏固定宽度有限：把五字的「自定义皮肤」单独占整行，另两个四字按钮平分下一行，
+        # 避免三按钮等宽时文字被挤压裁切。
+        skin_button = QPushButton("自定义皮肤")
+        skin_button.setObjectName("skinEntry")
+        skin_button.setFixedHeight(u(2.25))
+        skin_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        skin_button.setToolTip("上传自定义皮肤（需镜像支持 /skin）")
+        skin_button.clicked.connect(self.open_skin_page)
+        panel.add(skin_button)
+
         actions = QHBoxLayout()
         actions.setSpacing(u(0.75))
         instance_button = QPushButton("版本设置")
         instance_button.setFixedHeight(u(2.25))
+        instance_button.setCursor(Qt.CursorShape.PointingHandCursor)
         instance_button.clicked.connect(self._open_instance_dialog)
         actions.addWidget(instance_button, 1)
         open_button = QPushButton("打开目录")
         open_button.setFixedHeight(u(2.25))
+        open_button.setCursor(Qt.CursorShape.PointingHandCursor)
         open_button.clicked.connect(self._open_game_dir)
         actions.addWidget(open_button, 1)
         panel.add_layout(actions)
@@ -1160,10 +1199,13 @@ class MainWindow(QMainWindow):
         footer.addWidget(self.game_install_button)
         body.add_layout(footer)
         layout.addWidget(body, 1)
+        # 下载页懒构建：建好后补一次可能已加载的清单（横幅 + 版本表）
+        self._update_banner()
+        self._render_versions()
         return page
 
     def _build_plugins_page(self) -> QWidget:
-        """插件页：左 20k 分区导航，右 55k 空状态框架。"""
+        """插件页：左 20k 分区导航，右侧渲染官方内置插件（其余分区保留框架）。"""
         page = QWidget()
         layout = QHBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -1175,7 +1217,7 @@ class MainWindow(QMainWindow):
         column.setContentsMargins(SIDE_PAD, u(1), SIDE_PAD, u(2))
         column.setSpacing(u(0.5))
         column.addWidget(self._label("插件", "title"))
-        intro = self._label("启动器插件：市场 / 官方 / 社区 / 其他 / 已下载（接口未接入，先做框架）")
+        intro = self._label("仅官方内置插件；不动态加载第三方代码。")
         intro.setWordWrap(True)
         column.addWidget(intro)
         column.addSpacing(u(1.5))
@@ -1194,20 +1236,39 @@ class MainWindow(QMainWindow):
             column.addWidget(button)
             self.plugin_buttons[key] = button
         column.addStretch(1)
-        self.plugin_badge = Badge("框架", "gray")
+        self.plugin_badge = Badge("官方", "gray")
         badge_row = QHBoxLayout()
         badge_row.setContentsMargins(0, 0, 0, 0)
         badge_row.addWidget(self.plugin_badge)
         badge_row.addStretch(1)
         column.addLayout(badge_row)
-        self.plugin_buttons["market"].setChecked(True)
         layout.addWidget(left)
 
-        right = QWidget()
-        right_column = QVBoxLayout(right)
-        right_column.setContentsMargins(0, u(1), SIDE_PAD, u(2.5))
-        right_column.setSpacing(0)
+        # 右侧：官方列表与其余分区空状态二选一
+        self.plugin_detail_stack = QStackedWidget()
+        self.plugin_detail_stack.addWidget(self._build_plugin_stub())       # index 0
+        self.plugin_detail_stack.addWidget(self._build_plugin_official())   # index 1
+        layout.addWidget(self.plugin_detail_stack, 1)
+        self._switch_plugin("official")
+        return page
 
+    def _build_plugin_official(self) -> QWidget:
+        wrap = QWidget()
+        wrap_column = QVBoxLayout(wrap)
+        wrap_column.setContentsMargins(0, u(1), SIDE_PAD, u(2.5))
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        host = QWidget()
+        self._plugin_official_layout = QVBoxLayout(host)
+        self._plugin_official_layout.setContentsMargins(0, 0, u(0.5), 0)
+        self._plugin_official_layout.setSpacing(10)
+        self._plugin_official_layout.addStretch(1)
+        scroll.setWidget(host)
+        wrap_column.addWidget(scroll, 1)
+        return wrap
+
+    def _build_plugin_stub(self) -> QWidget:
         empty = Card(margins=(28, 28, 28, 22))
         icon_row = QHBoxLayout()
         icon_row.addStretch(1)
@@ -1231,36 +1292,173 @@ class MainWindow(QMainWindow):
         tiles.setSpacing(10)
         entries = [
             ("浏览插件", "连接插件源（待接入）"),
-            ("导入本地插件", "从 .zip / .py 安装（待接入）"),
+            ("导入本地插件", "从 .zip / .py 安装（暂不支持）"),
             ("插件目录", "打开插件存放目录"),
         ]
         for index, (title, hint) in enumerate(entries):
             tiles.addWidget(Tile(title, hint, lambda _c=False, t=title: self._plugin_stub(t)), 0, index)
         empty.add_layout(tiles)
-        right_column.addWidget(empty, 1)
-        layout.addWidget(right, 1)
-        self._switch_plugin("market")
-        return page
+        return empty
 
     PLUGIN_DESCS = {
         "market": "插件市场：后续可对接插件索引，目前仅保留页面框架与导航。",
-        "official": "官方插件：随启动器发布的插件列表将在这里展示。",
-        "community": "社区插件：来自社区仓库的插件将在这里展示。",
-        "other": "其他插件：手动导入或第三方来源的插件。",
-        "downloaded": "已下载插件：本地已安装的插件与启用状态。",
+        "official": "官方插件：随启动器发布的插件列在这里。",
+        "community": "社区插件：来自社区仓库的插件将在这里展示（不加载第三方代码）。",
+        "other": "其他插件：手动导入或第三方来源（暂不支持）。",
+        "downloaded": "已下载插件：等同于官方已启用列表。",
     }
 
     def _switch_plugin(self, key: str) -> None:
         for name, button in self.plugin_buttons.items():
             button.setChecked(name == key)
+        official = key in ("official", "downloaded")
+        self.plugin_detail_stack.setCurrentIndex(1 if official else 0)
+        if official:
+            self._rebuild_official_plugins()
+            return
         for name, text in PLUGIN_TABS:
             if name == key:
                 self.plugin_title.setText(text)
                 break
         self.plugin_desc.setText(self.PLUGIN_DESCS.get(key, ""))
 
+    def _rebuild_official_plugins(self) -> None:
+        layout = getattr(self, "_plugin_official_layout", None)
+        if layout is None:
+            return
+        while layout.count() > 1:
+            item = layout.takeAt(0)
+            if item.widget() is not None:
+                item.widget().deleteLater()
+        records = self.plugin_registry.records
+        for record in records:
+            layout.insertWidget(layout.count() - 1, self._make_plugin_card(record))
+        tone = "green" if any(r.status == "loaded" for r in records) else "gray"
+        self.plugin_badge.set(f"官方 · {len(records)} 个", tone)
+
+    def _make_plugin_card(self, record) -> QWidget:
+        card = Card()
+        top = QHBoxLayout()
+        manifest = record.manifest
+        name = QLabel(manifest.name)
+        name.setStyleSheet("font-size: 11pt; font-weight: 700;")
+        top.addWidget(name)
+        status_text, tone = self._plugin_status(record)
+        top.addWidget(Badge(status_text, tone))
+        top.addWidget(Badge(f"v{manifest.version}", "gray"))
+        top.addWidget(Badge("官方" if manifest.official else "第三方", "purple"))
+        top.addStretch(1)
+        toggle = QPushButton("停用" if record.enabled else "启用")
+        toggle.setObjectName("ghost")
+        toggle.setEnabled(record.status != "incompatible")
+        toggle.clicked.connect(
+            lambda _c, pid=manifest.id, en=record.enabled: self._toggle_plugin(pid, not en)
+        )
+        top.addWidget(toggle)
+        card.add_layout(top)
+        desc = QLabel(manifest.description)
+        desc.setObjectName("muted")
+        desc.setWordWrap(True)
+        card.add(desc)
+        caps = "、".join(manifest.capabilities) or "无"
+        card.add(self._label(f"能力：{caps}", "mutedSmall"))
+        if record.error:
+            err = QLabel(record.error)
+            err.setStyleSheet(f"color: {DANGER}; font-size: 8.5pt;")
+            err.setWordWrap(True)
+            card.add(err)
+        return card
+
+    @staticmethod
+    def _plugin_status(record) -> tuple[str, str]:
+        return {
+            "loaded": ("已加载", "green"),
+            "disabled": ("未启用", "gray"),
+            "incompatible": ("不兼容", "amber"),
+            "error": ("加载失败", "red"),
+        }.get(record.status, (record.status, "gray"))
+
+    def _toggle_plugin(self, plugin_id: str, enabled: bool) -> None:
+        if self.plugin_registry.set_enabled(plugin_id, enabled):
+            self.notice(("已启用 " if enabled else "已停用 ") + plugin_id, "INFO")
+        else:
+            self.notice("该插件当前不可切换", "WARN")
+        self._rebuild_official_plugins()
+
+    def _refresh_plugins_page(self) -> None:
+        if self.pages.get("plugins") is not None:
+            self._rebuild_official_plugins()
+
     def _plugin_stub(self, title: str) -> None:
-        self.notice(f"{title}：插件接口尚未接入，本节只做框架", "WARN")
+        if title == "插件目录":
+            _reveal(self.plugin_data_dir())
+            return
+        self.notice(f"{title}：仅官方内置插件，第三方接口暂不开放", "WARN")
+
+    # ------------------------------------------------------------- 联机 / 皮肤
+    def _build_online_page(self) -> QWidget:
+        self.online_page = OnlinePage(self)
+        return self.online_page
+
+    def plugin_data_dir(self) -> Path:
+        """收藏 / 最近 / 探测缓存 / 插件状态所在目录（与 config.json 同目录）。"""
+        return config_dir(self.data_dir)
+
+    @staticmethod
+    def _version_at_least(mc_version: str, target: tuple[int, int, int]) -> bool:
+        parts: list[int] = []
+        for token in re.split(r"[.\-+]", str(mc_version or "")):
+            if token.isdigit():
+                parts.append(int(token))
+            else:
+                break
+        return tuple(parts) >= target
+
+    def join_server(self, address: str) -> None:
+        """加入游戏：≥1.20.2 走 quickPlayMultiplayer 直连，否则复制地址提示手动添加。"""
+        QApplication.clipboard().setText(address)
+        instance = self.selected
+        if instance is None:
+            self.notice(f"已复制地址 {address}：请先在启动页选择一个版本，再加入服务器", "WARN")
+            return
+        if not self._version_at_least(instance.mc_version, (1, 20, 2)):
+            self.notice(
+                f"已复制地址 {address}：{instance.mc_version} 不支持直连，请在游戏内手动添加服务器",
+                "INFO",
+            )
+            return
+        self.launch_game(instance, quick_play=address)
+
+    def apply_avatar(self, data: bytes) -> None:
+        """上传成功后刷新启动页头像；字节无效时保持初始头像不变。"""
+        if not data:
+            return
+        pixmap = QPixmap()
+        if pixmap.loadFromData(data):
+            self.avatar.setPixmap(
+                pixmap.scaled(
+                    AVATAR_PX,
+                    AVATAR_PX,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.FastTransformation,
+                )
+            )
+
+    def open_skin_page(self) -> None:
+        """把皮肤页包成对话框弹出（入口：启动页账号行与设置页卡片）。"""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("自定义皮肤")
+        dialog.resize(u(40), u(28))
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(SkinPage(self))
+        dialog.exec()
+
+    def register_plugin_nav(self, plugin_id: str, label: str, factory: Callable[[], Any]) -> None:
+        """插件申请在导航挂载一项：本次仅登记，不新增顶层入口（官方插件用不到）。"""
+        self._plugin_nav_items.append((plugin_id, label, factory))
+        self.post_log("INFO", f"[plugins] {plugin_id} 登记了导航项“{label}”（未接入顶层导航）")
+
 
     def _build_java_tab(self) -> QWidget:
         page = QWidget()
@@ -1551,6 +1749,19 @@ class MainWindow(QMainWindow):
         download.add_layout(workers_row)
         layout.addWidget(download)
 
+        skin_card = Card()
+        skin_card.add(self._label("皮肤", "h2"))
+        skin_text = self._label("为当前账户上传自定义皮肤（需装了 CustomSkinLoader 的实例才会显示）")
+        skin_text.setWordWrap(True)
+        skin_card.add(skin_text)
+        skin_open = QPushButton("上传自定义皮肤")
+        skin_open.clicked.connect(self.open_skin_page)
+        skin_card.add(skin_open)
+        layout.addWidget(skin_card)
+
+        if self.plugin_registry.get("diagnostics") is not None:
+            layout.addWidget(self._build_diagnostics_card())
+
         about = Card()
         about.add(self._label("关于", "h2"))
         about_text = self._label(
@@ -1575,6 +1786,60 @@ class MainWindow(QMainWindow):
         right_column.addWidget(scroll, 1)
         outer.addWidget(right, 1)
         return page
+
+    # ------------------------------------------------------------- 连通性自检（官方插件）
+    def _build_diagnostics_card(self) -> Card:
+        card = Card()
+        card.add(self._label("连通性自检", "h2"))
+        hint = self._label("检查下载源与热度榜接口是否连通（官方 diagnostics 插件，只读探测）。")
+        hint.setWordWrap(True)
+        card.add(hint)
+        self.diag_status = self._label("尚未运行", "muted")
+        card.add(self.diag_status)
+        self.diag_body = QVBoxLayout()
+        self.diag_body.setSpacing(4)
+        card.add_layout(self.diag_body)
+        run = QPushButton("运行自检")
+        run.setObjectName("ghost")
+        run.clicked.connect(self._run_diagnostics)
+        card.add(run)
+        return card
+
+    def _run_diagnostics(self) -> None:
+        record = self.plugin_registry.get("diagnostics")
+        if record is None or record.instance is None:
+            self.notice("自检插件未加载", "WARN")
+            return
+        self.diag_status.setText("检测中……")
+
+        def worker(_cancel: threading.Event) -> str:
+            rows = record.instance.report()
+            self.post(lambda r=rows: self._render_diag_rows(r))
+            return "自检完成"
+
+        self.run_task("连通性自检", worker)
+
+    def _render_diag_rows(self, rows: list[dict]) -> None:
+        while self.diag_body.count():
+            item = self.diag_body.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        for row in rows:
+            line = QHBoxLayout()
+            line.setSpacing(8)
+            ok = bool(row.get("ok"))
+            dot = QLabel("●" if ok else "✕")
+            dot.setStyleSheet(f"color: {OK if ok else DANGER};")
+            line.addWidget(dot)
+            name = QLabel(str(row.get("label", "")))
+            name.setMinimumWidth(88)
+            line.addWidget(name)
+            detail = self._label(str(row.get("detail", "")), "mutedSmall")
+            detail.setWordWrap(True)
+            line.addWidget(detail, 1)
+            self.diag_body.addLayout(line)
+        self.diag_status.setText("完成")
 
     def _build_overlays(self) -> None:
         """版本号（右下）与任务面板（浮层），都不占内容区高度。"""
@@ -1648,18 +1913,23 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------- 导航
     def show_page(self, name: str) -> None:
-        if name not in self.pages:
+        page = self._ensure_page(name)
+        if page is None:
             return
-        self.stack.setCurrentWidget(self.pages[name])
+        self.stack.setCurrentWidget(page)
         for key, button in self.nav_buttons.items():
             button.setChecked(key == name)
         if name == "home":
             self.refresh_instances()
+        elif name == "online":
+            self.online_page.ensure_loaded()
         elif name == "download":
             self.switch_tab(self._current_tab)
             self._refresh_source_badge()
         elif name == "settings":
             self._load_settings_values()
+        elif name == "plugins":
+            self._refresh_plugins_page()
 
     def goto_content(self, kind: str) -> None:
         self.show_page("download")
@@ -1865,7 +2135,7 @@ class MainWindow(QMainWindow):
             return
         self.launch_game(self.selected)
 
-    def launch_game(self, instance: Instance) -> None:
+    def launch_game(self, instance: Instance, quick_play: str | None = None) -> None:
         if self.process is not None and self.process.running:
             self.notice("游戏已经在运行了", "WARN")
             return
@@ -1881,17 +2151,30 @@ class MainWindow(QMainWindow):
             or self.config.java_overrides.get("__global__"),
             extra_jvm=list(self.config.extra_jvm),
             game_dir=str(target_dir),
+            quick_play_server=quick_play,
         )
 
         def worker(cancel: threading.Event) -> str:
+            t_load = time.perf_counter()
             version = load_version(game_dir, instance.id)
-            profile = make_profile(self.config.username)
+            profile = get_provider(self.config).acquire(self.config)
+            load_ms = (time.perf_counter() - t_load) * 1000
             plan = self._build_command_with_repair(
                 version, game_dir, profile, options, cancel
             )
             for warning in plan.warnings:
                 self.post_log("WARN", warning)
             self.post_log("INFO", f"启动 {instance.id}（{plan.java.display}）")
+            seg = plan.timings
+            self.post_log(
+                "PERF",
+                "启动耗时(ms) "
+                f"load={load_ms:.0f} "
+                f"classpath={seg.get('classpath', 0):.0f} "
+                f"natives={seg.get('natives', 0):.0f} "
+                f"java={seg.get('java', 0):.0f} "
+                f"assemble={seg.get('assemble', 0):.0f}",
+            )
 
             def on_line(line: str) -> None:
                 self.post_log("INFO", line)
@@ -1901,9 +2184,17 @@ class MainWindow(QMainWindow):
                 self.post_log(level, f"游戏进程退出，代码 {code}")
                 self.events.put(("launch_done", None))
 
+            t_spawn = time.perf_counter()
             proc = GameProcess(plan, on_line=on_line, on_exit=on_exit)
             self.process = proc
             proc.start()
+            self.post_log("PERF", f"spawn={(time.perf_counter() - t_spawn) * 1000:.0f}ms")
+            # 回写 Java 磁盘缓存，下次启动免重复探测（失败不影响启动）
+            try:
+                self.config.java_cache = export_java_cache()
+                save_config(self.config, self.data_dir)
+            except OSError:
+                pass
             self.events.put(("launch_started", None))
             return "游戏运行中"
 
@@ -2311,7 +2602,16 @@ class MainWindow(QMainWindow):
 
     def _apply_manifest(self, manifest: VersionManifest) -> None:
         self.manifest = manifest
-        if manifest.latest_release:
+        self._update_banner()
+        self._render_versions()
+        self.status(f"版本清单已就绪：{len(manifest.versions)} 个版本")
+
+    def _update_banner(self) -> None:
+        """把当前清单信息写进下载页顶部的最新版卡片（下载页懒构建，未建则跳过）。"""
+        if not hasattr(self, "banner_title"):
+            return
+        manifest = self.manifest
+        if manifest is not None and manifest.latest_release:
             summary = manifest.find(manifest.latest_release)
             self.banner_title.setText(f"最新正式版 {manifest.latest_release}")
             hint = f"发布于 {summary.release_time[:10]}" if summary else ""
@@ -2320,8 +2620,6 @@ class MainWindow(QMainWindow):
             self.banner_hint.setText(hint)
             self.banner_icon.setPixmap(block_pixmap(manifest.latest_release, 44))
             self.banner_button.setEnabled(True)
-        self._render_versions()
-        self.status(f"版本清单已就绪：{len(manifest.versions)} 个版本")
 
     # ------------------------------------------------------------- 网络工具
     def make_downloader(self, *, progress: bool = True, workers: int | None = None) -> Downloader:
@@ -2669,7 +2967,7 @@ class MainWindow(QMainWindow):
             index = combo.findData(override)
             combo.setCurrentIndex(index if index >= 0 else 0)
             combo.blockSignals(False)
-        if not candidates:
+        if not candidates and hasattr(self, "settings_java"):
             self.settings_java.setToolTip("未检测到 Java，可点「添加 Java」手动指定")
 
     def _on_java_changed(self, index: int) -> None:
@@ -2728,6 +3026,124 @@ class MainWindow(QMainWindow):
             self.process.stop()
         self._timer.stop()
         event.accept()
+
+
+class AddServerDialog(QDialog):
+    """添加服务器：名称（可选）/ 地址 / 端口。实际校验交给 ServerStore。"""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("添加服务器")
+        self.setMinimumWidth(u(24))
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 16, 18, 14)
+        layout.setSpacing(10)
+
+        title = QLabel("添加服务器")
+        title.setObjectName("h2")
+        layout.addWidget(title)
+        hint = QLabel("例：mc.example.com 或 1.2.3.4:25565（默认端口 25565）")
+        hint.setObjectName("muted")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        self.name_edit = QLineEdit()
+        self.name_edit.setPlaceholderText("备注名（可选）")
+        layout.addWidget(self._labeled("名称", self.name_edit))
+
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        self.host_edit = QLineEdit()
+        self.host_edit.setPlaceholderText("服务器地址")
+        self.port_edit = QLineEdit("25565")
+        self.port_edit.setFixedWidth(u(5))
+        self.port_edit.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        row.addWidget(self.host_edit, 1)
+        row.addWidget(QLabel(":"))
+        row.addWidget(self.port_edit)
+        addr_wrap = QWidget()
+        addr_wrap.setLayout(row)
+        layout.addWidget(self._labeled("地址 / 端口", addr_wrap))
+
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        cancel = QPushButton("取消")
+        cancel.setObjectName("ghost")
+        cancel.clicked.connect(self.reject)
+        ok = QPushButton("添加")
+        ok.setObjectName("primary")
+        ok.setDefault(True)
+        ok.clicked.connect(self.accept)
+        buttons.addWidget(cancel)
+        buttons.addWidget(ok)
+        layout.addLayout(buttons)
+
+    @staticmethod
+    def _labeled(text: str, widget: QWidget) -> QWidget:
+        wrap = QWidget()
+        column = QVBoxLayout(wrap)
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(3)
+        label = QLabel(text)
+        label.setObjectName("mutedSmall")
+        column.addWidget(label)
+        column.addWidget(widget)
+        return wrap
+
+    def address(self) -> str:
+        host = self.host_edit.text().strip()
+        port = self.port_edit.text().strip()
+        if port and port != "25565":
+            inner = f"[{host}]" if ":" in host else host
+            return f"{inner}:{port}"
+        return host
+
+    def server_label(self) -> str:
+        return self.name_edit.text().strip()
+
+
+class _PluginHost:
+    """把 MainWindow 的宿主原语受限地递给官方插件（实现 PluginHost 协议）。
+
+    插件永远拿不到本适配器，只通过 PluginContext 的白名单访问器调用这里。
+    ``mirror_probe`` / ``mirror_download`` 把下载源 origin 封在内部：插件只给相对路径。
+    """
+
+    def __init__(self, window: "MainWindow") -> None:
+        self.window = window
+
+    def notice(self, text: str, level: str = "INFO") -> None:
+        self.window.notice(f"[插件] {text}", level)
+
+    def post_log(self, level: str, text: str) -> None:
+        self.window.post_log(level, text)
+
+    def register_nav_item(self, plugin_id: str, label: str, factory) -> None:
+        self.window.register_plugin_nav(plugin_id, label, factory)
+
+    def run_task(self, name: str, fn) -> None:
+        self.window.run_task(name, fn)
+
+    def list_instances(self) -> list[Any]:
+        return list(self.window.instances)
+
+    def save_plugin_config(self) -> None:
+        self.window.plugin_registry.save()
+
+    def mirror_probe(self, path: str) -> dict:
+        base = self.window.config.download_base or ""
+        if not base:
+            raise RuntimeError("未配置下载源，无法探测")
+        url = f"{base.rstrip('/')}{path}"
+        data = self.window.make_downloader(progress=False).fetch_json(url)
+        return data if isinstance(data, dict) else {}
+
+    def mirror_download(self, url: str, dest: Any) -> Any:
+        data = self.window.make_downloader(progress=False).fetch_bytes(url)
+        target = Path(dest)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+        return target
 
 
 def run_app(config: Config, data_dir: str | Path | None = None) -> None:

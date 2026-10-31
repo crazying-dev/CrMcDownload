@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,16 @@ __all__ = [
 ]
 
 _MAX_DEPTH = 8
+
+#: 版本解析缓存（进程内 LRU）：键 ``(mc_dir, id)``，值 ``((mtime_ns, size), MergedVersion)``。
+#: 以顶层版本 JSON 的 mtime+size 作指纹，文件没变就跳过重复解析与 inheritsFrom 合并。
+_VERSION_CACHE: "OrderedDict[tuple[str, str], tuple[tuple[int, int], MergedVersion]]" = OrderedDict()
+_VERSION_CACHE_MAX = 32
+
+
+def clear_version_cache() -> None:
+    """清空版本缓存（安装/修复版本后调用，或测试隔离用）。"""
+    _VERSION_CACHE.clear()
 
 
 class VersionError(RuntimeError):
@@ -153,8 +164,31 @@ def resolve_chain(mc_dir: Path, version_id: str) -> list[dict[str, Any]]:
 
 
 def load_version(mc_dir: Path | str, version_id: str) -> MergedVersion:
-    """读取并合并版本（含 inheritsFrom）。"""
+    """读取并合并版本（含 inheritsFrom），带进程内 LRU 缓存。"""
     mc_dir = Path(mc_dir)
+    key = (str(mc_dir), version_id)
+    json_path = mc_dir / "versions" / version_id / f"{version_id}.json"
+    fingerprint: tuple[int, int] | None
+    try:
+        stat = json_path.stat()
+        fingerprint = (stat.st_mtime_ns, stat.st_size)
+    except OSError:
+        fingerprint = None
+    if fingerprint is not None:
+        hit = _VERSION_CACHE.get(key)
+        if hit is not None and hit[0] == fingerprint:
+            _VERSION_CACHE.move_to_end(key)
+            return hit[1]
+    version = _load_version_uncached(mc_dir, version_id)
+    if fingerprint is not None:
+        _VERSION_CACHE[key] = (fingerprint, version)
+        _VERSION_CACHE.move_to_end(key)
+        while len(_VERSION_CACHE) > _VERSION_CACHE_MAX:
+            _VERSION_CACHE.popitem(last=False)
+    return version
+
+
+def _load_version_uncached(mc_dir: Path, version_id: str) -> MergedVersion:
     chain = resolve_chain(mc_dir, version_id)
     merged = chain[0]
     for layer in chain[1:]:

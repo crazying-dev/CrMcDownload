@@ -55,6 +55,14 @@ class Config:
     recent_dirs: list[str] = field(default_factory=list)
     window: dict[str, int] = field(default_factory=lambda: {"w": 1180, "h": 760})
     java_cache: dict[str, Any] = field(default_factory=dict)
+    #: 联机：是否允许探听内网/回环服务器（默认关，避免把客户端变成 SSRF 跳板）
+    allow_local_servers: bool = False
+    #: 皮肤：是否启用 CSL 自动安装与上传入口
+    skin_enabled: bool = True
+    #: 皮肤模型：``auto`` 按图片判定 / ``classic`` / ``slim``
+    skin_model: str = "auto"
+    #: 账户提供者（本次仅 ``offline``；预留给外置登录）
+    account_provider: str = "offline"
 
     def to_json(self) -> dict[str, Any]:
         return asdict(self)
@@ -73,6 +81,10 @@ class Config:
         self.width = max(320, int(self.width))
         self.height = max(240, int(self.height))
         self.download_base = (self.download_base or "").strip().rstrip("/")
+        if self.skin_model not in ("auto", "classic", "slim"):
+            self.skin_model = "auto"
+        if not self.account_provider:
+            self.account_provider = "offline"
         if not self.username:
             self.username = "Player"
 

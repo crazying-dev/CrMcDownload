@@ -1,16 +1,17 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+from PyInstaller.utils.hooks import collect_submodules
 
 a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
     datas=[],
-    hiddenimports=[],
+    hiddenimports=collect_submodules('PIL') + collect_submodules('offcraft.plugins.builtin'),
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=['PIL', 'paramiko'],
+    excludes=['paramiko'],
     noarchive=False,
     optimize=0,
 )

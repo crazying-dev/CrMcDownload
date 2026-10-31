@@ -292,7 +292,13 @@ class Downloader:
             except OSError:
                 pass
 
-    def _open(self, url: str, extra_headers: dict[str, str] | None = None, method: str = "GET"):
+    def _open(
+        self,
+        url: str,
+        extra_headers: dict[str, str] | None = None,
+        method: str = "GET",
+        body: bytes | None = None,
+    ):
         parts = urlsplit(url)
         if parts.scheme not in ("http", "https") or not parts.hostname:
             raise DownloadError(f"非法 URL：{url}")
@@ -304,6 +310,8 @@ class Downloader:
         if parts.query:
             path += "?" + parts.query
         headers = self._headers(url, extra_headers)
+        if body is not None and "Content-Length" not in headers:
+            headers["Content-Length"] = str(len(body))
 
         pool = self._pooled()
         conn = pool.pop(key, None)
@@ -311,7 +319,7 @@ class Downloader:
         if conn is None:
             conn = self._new_connection(scheme, host, port)
         try:
-            conn.request(method, path, headers=headers)
+            conn.request(method, path, body=body, headers=headers)
             resp = conn.getresponse()
         except (OSError, http.client.HTTPException):
             try:
@@ -320,7 +328,7 @@ class Downloader:
                 pass
             if reused:
                 conn = self._new_connection(scheme, host, port)
-                conn.request(method, path, headers=headers)
+                conn.request(method, path, body=body, headers=headers)
                 resp = conn.getresponse()
             else:
                 raise
@@ -350,6 +358,7 @@ class Downloader:
         url: str,
         extra_headers: dict[str, str] | None = None,
         method: str = "GET",
+        body: bytes | None = None,
         *,
         attempts: int | None = None,
     ):
@@ -357,7 +366,7 @@ class Downloader:
         last: Exception | None = None
         for attempt in range(attempts):
             try:
-                return self._open(url, extra_headers, method)
+                return self._open(url, extra_headers, method, body)
             except (OSError, http.client.HTTPException) as exc:
                 last = exc
                 if attempt + 1 < attempts:
@@ -387,6 +396,48 @@ class Downloader:
             return json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise DownloadError(f"JSON 解析失败：{url}（{exc}）") from exc
+
+    def request_json(
+        self,
+        url: str,
+        method: str = "GET",
+        *,
+        body: dict[str, Any] | bytes | None = None,
+        headers: dict[str, str] | None = None,
+        max_size: int = 4 * 1024 * 1024,
+    ) -> Any:
+        """任意方法的 JSON 请求（镜像 API 上报、皮肤上传等）。
+
+        仍走 :meth:`_headers` 的令牌规则 —— 只有目标 origin 与镜像一致才带 token。
+        """
+        payload = body
+        extra = dict(headers or {})
+        if isinstance(body, dict):
+            payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
+            extra.setdefault("Content-Type", "application/json; charset=utf-8")
+        elif isinstance(body, bytes) and "Content-Type" not in extra:
+            extra.setdefault("Content-Type", "application/octet-stream")
+        conn, resp, key = self._request_with_retry(url, extra, method.upper(), payload, attempts=1)
+        reusable = False
+        try:
+            if resp.status not in (200, 201, 202, 204):
+                detail = resp.read(512).decode("utf-8", "replace")
+                raise DownloadError(f"HTTP {resp.status}：{detail[:200]}")
+            data = resp.read(max_size + 1)
+            if len(data) > max_size:
+                raise DownloadError(f"响应超过 {max_size} 字节：{url}")
+            reusable = True
+            if not data:
+                return {}
+            try:
+                return json.loads(data.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise DownloadError(f"JSON 解析失败：{url}（{exc}）") from exc
+        finally:
+            if reusable:
+                self._finish(conn, resp, key)
+            else:
+                conn.close()
 
     # -------------------------------------------------------------- download
     def download(

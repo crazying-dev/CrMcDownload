@@ -4,17 +4,25 @@ from __future__ import annotations
 
 import re
 import sys
+import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable
+from typing import TYPE_CHECKING, Any, Iterable
 
 from offcraft import APP_NAME, __version__
 from offcraft.launch.auth import OfflineProfile
 from offcraft.launch.java import JavaCandidate, detect_java
-from offcraft.launch.libraries import ClasspathPlan, build_classpath
+from offcraft.launch.libraries import ClasspathPlan, build_classpath, native_jar_paths
 from offcraft.launch.natives import ensure_natives, natives_directory
 from offcraft.meta.rules import OsInfo, is_allowed
 from offcraft.meta.version import MergedVersion
+
+if TYPE_CHECKING:  # pragma: no cover - 仅类型标注
+    from offcraft.account import LaunchAccount
+
+#: 启动命令需要的账户形态：旧 OfflineProfile 或新 LaunchAccount（字段兼容）
+AccountLike = "OfflineProfile | LaunchAccount"
 
 __all__ = ["CommandPlan", "LaunchError", "LaunchOptions", "build_command", "shell_quote"]
 
@@ -38,6 +46,10 @@ class LaunchOptions:
     extra_game: list[str] = field(default_factory=list)
     launcher_name: str = APP_NAME
     launcher_version: str = __version__
+    #: 「加入游戏」直连的服务器地址（>=1.20.2 走 quickPlayMultiplayer）
+    quick_play_server: str | None = None
+    #: 账户提供的 javaagent（外置登录用）；为 None 时不注入
+    java_agent: str | None = None
 
     def normalized_memory(self) -> int:
         return max(512, min(65536, int(self.memory_mb)))
@@ -51,6 +63,8 @@ class CommandPlan:
     natives_dir: Path
     classpath: ClasspathPlan
     warnings: list[str] = field(default_factory=list)
+    #: 各段耗时（毫秒），供启动埋点；键如 classpath / natives / java / assemble
+    timings: dict[str, float] = field(default_factory=dict)
 
     @property
     def command_line(self) -> str:
@@ -95,7 +109,7 @@ def _expand(text: str, subs: dict[str, str], warnings: list[str]) -> str:
 def _substitutions(
     version: MergedVersion,
     mc_dir: Path,
-    profile: OfflineProfile,
+    profile: "AccountLike",
     options: LaunchOptions,
     classpath: str,
     natives_dir: Path,
@@ -125,7 +139,7 @@ def _substitutions(
         "resolution_height": str(options.height or 480),
         "quickPlayPath": "",
         "quickPlaySingleplayer": "",
-        "quickPlayMultiplayer": "",
+        "quickPlayMultiplayer": options.quick_play_server or "",
         "quickPlayRealms": "",
     }
 
@@ -145,7 +159,7 @@ def _collect_excludes(version: MergedVersion, os_info: OsInfo, features: dict[st
 def build_command(
     version: MergedVersion,
     mc_dir: Path | str,
-    profile: OfflineProfile,
+    profile: "AccountLike",
     *,
     options: LaunchOptions | None = None,
     os_info: OsInfo | None = None,
@@ -159,21 +173,41 @@ def build_command(
     if options.width and options.height:
         features["has_custom_resolution"] = True
 
-    classpath = build_classpath(version, mc_dir, os_info, features)
+    timings: dict[str, float] = {}
+    # 先做纯路径解析（无 I/O），再让 classpath 校验（大量 is_file）与 natives 解压（zip 读写）
+    # 两个 I/O 密集型任务在线程池里并行；两者都释放 GIL，重叠后取较慢者而非之和。
+    native_jars = native_jar_paths(version, mc_dir, os_info, features)
+    excludes = _collect_excludes(version, os_info, features)
+    natives_dir = natives_directory(mc_dir, version.id)
+
+    def _do_classpath() -> ClasspathPlan:
+        t0 = time.perf_counter()
+        plan = build_classpath(version, mc_dir, os_info, features)
+        timings["classpath"] = (time.perf_counter() - t0) * 1000
+        return plan
+
+    def _do_natives() -> None:
+        if not extract_natives_now:
+            natives_dir.mkdir(parents=True, exist_ok=True)
+            return
+        t0 = time.perf_counter()
+        ensure_natives(version.id, mc_dir, native_jars, excludes)
+        timings["natives"] = (time.perf_counter() - t0) * 1000
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        cp_future = pool.submit(_do_classpath)
+        nv_future = pool.submit(_do_natives)
+        classpath = cp_future.result()
+        nv_future.result()
+
     if classpath.missing:
         preview = "\n".join(f"  - {path}" for path in classpath.missing[:10])
         raise LaunchError(
             f"缺少 {len(classpath.missing)} 个依赖文件，请先安装/修复该版本：\n{preview}"
         )
 
-    natives_dir = natives_directory(mc_dir, version.id)
-    excludes = _collect_excludes(version, os_info, features)
-    if extract_natives_now:
-        ensure_natives(version.id, mc_dir, classpath.native_jars, excludes)
-    else:
-        natives_dir.mkdir(parents=True, exist_ok=True)
-
     component = (version.raw.get("javaVersion") or {}).get("component")
+    t0 = time.perf_counter()
     try:
         java = detect_java(
             mc_dir,
@@ -183,6 +217,8 @@ def build_command(
         )
     except Exception as exc:  # noqa: BLE001 - 转为启动错误
         raise LaunchError(str(exc)) from exc
+    timings["java"] = (time.perf_counter() - t0) * 1000
+    t_asm = time.perf_counter()
 
     subs = _substitutions(version, mc_dir, profile, options, classpath.classpath, natives_dir)
     warnings: list[str] = list(classpath.warnings)
@@ -195,6 +231,12 @@ def build_command(
         jvm_args.append(f"-Djava.library.path={natives_dir}")
     if "-cp" not in jvm_args and "-classpath" not in jvm_args:
         jvm_args.extend(["-cp", classpath.classpath])
+    # 账户携带的 javaagent（外置登录）+ 额外 JVM 参数
+    agent = options.java_agent or getattr(profile, "java_agent", None)
+    if agent:
+        jvm_args.append(f"-javaagent:{agent}")
+    for extra in getattr(profile, "extra_jvm", None) or []:
+        jvm_args.append(extra)
     jvm_args.extend(options.extra_jvm)
 
     game_args: list[str] = []
@@ -218,6 +260,7 @@ def build_command(
     game_dir = Path(options.game_dir) if options.game_dir else mc_dir
     game_dir.mkdir(parents=True, exist_ok=True)
     argv = [str(java.path), *jvm_args, version.main_class, *game_args]
+    timings["assemble"] = (time.perf_counter() - t_asm) * 1000
     return CommandPlan(
         argv=argv,
         cwd=game_dir,
@@ -225,4 +268,5 @@ def build_command(
         natives_dir=natives_dir,
         classpath=classpath,
         warnings=warnings,
+        timings=timings,
     )

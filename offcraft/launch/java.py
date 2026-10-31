@@ -14,12 +14,31 @@ __all__ = [
     "JavaCandidate",
     "JavaNotFound",
     "detect_java",
+    "export_java_cache",
     "list_java",
+    "prime_java_cache",
     "probe_java",
 ]
 
 _CACHE: dict[str, tuple[float, int | None]] = {}
 _VERSION_RE = re.compile(r'version "([^"]+)"')
+#: java -version 子进程上限：拿不到就当这个候选不可用，不把启动卡住
+_PROBE_TIMEOUT = 1.5
+
+
+def prime_java_cache(entries: dict | None) -> None:
+    """从磁盘（``config.java_cache``）预热进程内缓存；格式 ``{路径: [mtime, major]}``。"""
+    for key, value in (entries or {}).items():
+        try:
+            mtime, major = value[0], value[1]
+        except (TypeError, IndexError):
+            continue
+        _CACHE[str(key).lower()] = (float(mtime), int(major) if major is not None else None)
+
+
+def export_java_cache() -> dict:
+    """导出当前缓存回写磁盘（只留探明主版本的项，控制体积）。"""
+    return {key: [mtime, major] for key, (mtime, major) in _CACHE.items() if major is not None}
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,7 +103,7 @@ def probe_java(java_exe: Path | str) -> int | None:
                 [str(path), "-version"],
                 capture_output=True,
                 text=True,
-                timeout=15,
+                timeout=_PROBE_TIMEOUT,
                 creationflags=flags,
             )
             output = (proc.stderr or "") + (proc.stdout or "")
@@ -183,6 +202,14 @@ def detect_java(
         if required and major < required:
             raise JavaNotFound(required, [candidate])
         return candidate
+
+    # 快路径：版本自带 Mojang runtime（常见）时直接命中，不扫六个 Program Files 根
+    if preferred_component:
+        fast = Path(mc_dir) / "runtime" / preferred_component / "bin" / "java.exe"
+        major = probe_java(fast)
+        if major is not None and (required is None or major >= required):
+            return JavaCandidate(path=fast, major=major, label=f"Java {major}",
+                                 source=f"runtime/{preferred_component}")
 
     candidates = list_java(mc_dir)
     if not candidates:

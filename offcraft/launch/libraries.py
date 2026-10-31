@@ -10,7 +10,7 @@ from offcraft.install.plan import maven_path, maven_path_with_classifier
 from offcraft.meta.rules import OsInfo, is_allowed
 from offcraft.meta.version import MergedVersion
 
-__all__ = ["ClasspathPlan", "build_classpath"]
+__all__ = ["ClasspathPlan", "build_classpath", "native_jar_paths"]
 
 
 @dataclass(slots=True)
@@ -54,6 +54,35 @@ def _native_path(library: dict[str, Any], classifier: str) -> str | None:
         except Exception:  # noqa: BLE001
             return None
     return None
+
+
+def _iter_natives(
+    version: MergedVersion,
+    libraries_dir: Path,
+    os_info: OsInfo,
+    features: dict[str, bool],
+):
+    """纯路径计算：产出与平台匹配的 native jar 路径，不做任何 ``stat``/校验。"""
+    for library in version.libraries:
+        if not is_allowed(library.get("rules"), os_info, features):
+            continue
+        classifier = (library.get("natives") or {}).get("windows")
+        if not classifier:
+            continue
+        relative = _native_path(library, classifier)
+        if relative is not None:
+            yield libraries_dir / relative
+
+
+def native_jar_paths(
+    version: MergedVersion,
+    mc_dir: Path | str,
+    os_info: OsInfo | None = None,
+    features: dict[str, bool] | None = None,
+) -> list[Path]:
+    """仅解析 native jar 路径（供 natives 解压与 classpath 校验并行使用）。"""
+    os_info = os_info or OsInfo()
+    return list(_iter_natives(version, Path(mc_dir) / "libraries", os_info, features or {}))
 
 
 def build_classpath(

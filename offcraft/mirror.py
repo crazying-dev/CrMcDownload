@@ -103,6 +103,12 @@ class Mirror:
     def rewrite_optional(self, url: str | None) -> str | None:
         return None if url is None else self.rewrite(url)
 
+    def api_url(self, path: str) -> str:
+        """镜像自有的 API / 皮肤 / 看板地址：``/api/*``、``/skin/*``、``/page`` 不做路由改写。"""
+        if not path.startswith("/"):
+            path = "/" + path
+        return f"{self.base_url}{path}"
+
     def is_mirror_url(self, url: str) -> bool:
         return url.startswith(self.base_url + "/")
 
