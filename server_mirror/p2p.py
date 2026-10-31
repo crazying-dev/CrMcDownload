@@ -2,10 +2,12 @@
 
 设计（对应「离线版联机」计划 Phase 1）：
 
-- ``SignalingRouter``：内存房间表（房间 -> 成员名册 + 待配对中继令牌），随
-  TTL 空闲回收。房主「开启」房间时登记从预共享密钥派生的 ``auth_key``（32B MAC
-  校验密钥），加入者用它算出的 ``proof`` 由服务端校验——服务端拿不到 PSK，也拿
-  不到能解密数据面的会话密钥，只能判定准入。房间规模封顶，避免被撑爆。
+- ``SignalingRouter``：两层房间模型——**持久登记**（``p2p_rooms`` SQLite 表：全局唯一小写房间
+  名 + 属主 device_id + 创建/列表/删除，每设备现存未删除房间数封顶 ``p2p_max_rooms_per_device``）
+  与**实时会话**（内存房间 -> 成员名册 + 待配对中继令牌，随 TTL 空闲回收）。房主先 ``create``
+  登记房间名（专用入口），再 ``open`` 开一个实时会话并登记从密码派生的 ``auth_key``；加入者 ``join``
+  用它算出的 ``proof`` 由服务端校验——服务端拿不到密码，也拿不到能解密数据面的会话密钥，只能
+  判定准入；房间未开放一律 404，**绝不自动建房**。加入者可查询 ``list`` 自己创建过的房间。房间规模封顶。
 - ``RelayServer``：跑在独立线程的 asyncio 事件循环里的 TCP 中继，按令牌把两条
   入站连接成对拼桥。它只转发不透明密文帧、绝不解密；单会话累计字节 / 存活时长
   封顶后立刻断开，防止镜像沦为无限流量的开放中继。停止时干净关循环与套接字。
@@ -84,9 +86,11 @@ class Peer:
 
 @dataclass
 class Room:
-    code: str
+    code: str           # 规范化小写房间名（全局唯一，作实时会话字典键）
     auth_key: bytes     # host 登记的准入校验密钥（服务端不能据此解密）
     host_sid: str
+    display: str = ""   # 原始大小写展示名
+    owner: str = ""     # 创建者 device_id
     world: str = ""
     port: int = 0
     peers: dict[str, Peer] = field(default_factory=dict)
@@ -111,11 +115,20 @@ def _clamp_sid(value: Any) -> str:
     return ""
 
 
+def _norm_device(value: Any) -> str:
+    """设备标识：客户端首启生成的稳定 hex；这里只做长度/字符集约束。"""
+    text = str(value or "").strip()
+    if 8 <= len(text) <= 64 and all(c in "0123456789abcdef" for c in text):
+        return text
+    return ""
+
+
 # ------------------------------------------------------------------ 信令路由器
 @dataclass
 class SignalingRouter:
     settings: Any
     relay: "RelayServer | None" = None
+    db: Any = None          # server_mirror.db.Database（房间持久登记）；None 时 create/open 不可用
     _rooms: dict[str, Room] = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
@@ -123,6 +136,7 @@ class SignalingRouter:
     _MAX_ROOMS_DEFAULT = 256
     _MAX_PEERS = 16
     _ROOM_TTL_DEFAULT = 180
+    _MAX_PER_DEVICE_DEFAULT = 10
 
     @property
     def _ttl(self) -> float:
@@ -131,6 +145,10 @@ class SignalingRouter:
     @property
     def _max_rooms(self) -> int:
         return max(1, getattr(self.settings, "p2p_max_rooms", self._MAX_ROOMS_DEFAULT))
+
+    @property
+    def _max_per_device(self) -> int:
+        return max(0, getattr(self.settings, "p2p_max_rooms_per_device", self._MAX_PER_DEVICE_DEFAULT))
 
     def relay_info(self) -> dict[str, Any]:
         host = (getattr(self.settings, "p2p_relay_host", "") or "").strip()
@@ -158,6 +176,10 @@ class SignalingRouter:
     ) -> tuple[int, dict[str, Any]]:
         action = path[len("/p2p/"):].split("/", 1)[0]
         handler = {
+            "create": self._create,
+            "list": self._list,
+            "delete": self._delete,
+            "open": self._open,
             "join": self._join,
             "announce": self._announce,
             "relay": self._relay,
@@ -165,53 +187,117 @@ class SignalingRouter:
         }.get(action)
         if handler is None:
             return 404, {"error": "未知信令接口"}
-        room_code = str(payload.get("room") or "").strip()[:64]
-        if not room_code:
-            return 400, {"error": "缺少房间码"}
-        return handler(room_code, payload, client)
+        name = str(payload.get("room") or "").strip()[:64]
+        if action != "list" and not name:
+            return 400, {"error": "缺少房间名"}
+        return handler(name, payload, client)
 
-    # -------------------------------------------------------------- /p2p/join
-    def _join(self, code: str, payload: dict[str, Any], client: Any) -> tuple[int, dict]:
+    # ------------------------------------------------------------ /p2p/create
+    def _create(self, name: str, payload: dict[str, Any], client: Any) -> tuple[int, dict]:
+        """专用入口：登记一个新房间（全局唯一名 + 每设备配额）。密码/auth_key 不入 DB。"""
+        device = _norm_device(payload.get("device_id"))
+        if not device:
+            return 400, {"error": "缺少设备标识"}
+        if self.db is None:
+            return 503, {"error": "房间存储未启用"}
+        result = self.db.create_room(name, name, device, max_per_device=self._max_per_device)
+        if result == "exists":
+            return 409, {"error": "房间名已存在"}
+        if result == "quota":
+            return 403, {"error": f"每台设备最多 {self._max_per_device} 个房间"}
+        return 200, {"ok": True, "name": name.strip().lower(),
+                      "rooms": self.db.list_rooms(device)}
+
+    # -------------------------------------------------------------- /p2p/list
+    def _list(self, _name: str, payload: dict[str, Any], client: Any) -> tuple[int, dict]:
+        device = _norm_device(payload.get("device_id"))
+        if not device:
+            return 400, {"error": "缺少设备标识"}
+        rooms = self.db.list_rooms(device) if self.db is not None else []
+        remaining = max(0, self._max_per_device - len(rooms))
+        return 200, {"rooms": rooms, "remaining": remaining, "limit": self._max_per_device}
+
+    # ------------------------------------------------------------ /p2p/delete
+    def _delete(self, name: str, payload: dict[str, Any], client: Any) -> tuple[int, dict]:
+        device = _norm_device(payload.get("device_id"))
+        if not device:
+            return 400, {"error": "缺少设备标识"}
+        if self.db is None:
+            return 503, {"error": "房间存储未启用"}
+        key = name.strip().lower()
+        reg = self.db.get_room(key)
+        if reg is None:
+            return 404, {"error": "房间不存在"}
+        if reg.get("owner") != device:
+            return 403, {"error": "只能删除自己创建的房间"}
+        self.db.delete_room(key, device)
+        with self._lock:
+            self._rooms.pop(key, None)  # 若正开放，一并撤下实时会话
+        return 200, {"ok": True}
+
+    # -------------------------------------------------------------- /p2p/open
+    def _open(self, name: str, payload: dict[str, Any], client: Any) -> tuple[int, dict]:
+        """房主开一个实时会话供加入：房间须已由本设备创建登记。"""
+        device = _norm_device(payload.get("device_id"))
+        if not device:
+            return 400, {"error": "缺少设备标识"}
+        key = name.strip().lower()
+        reg = self.db.get_room(key) if self.db is not None else None
+        if reg is None:
+            return 404, {"error": "房间未创建，请先创建"}
+        if reg.get("owner") != device:
+            return 403, {"error": "不是你的房间"}
+        auth_key = _unhex(payload.get("auth_key"), _AUTH_KEY_BYTES)
+        if auth_key is None:
+            return 400, {"error": "缺少或非法的 auth_key"}
         pub_hex = payload.get("client_pub")
-        nonce_hex = payload.get("nonce")
-        proof_hex = payload.get("proof")
-        is_host = bool(payload.get("is_host"))
         addr = _client_addr(client)
         now = time.time()
         with self._lock:
             self._prune(now)
-            room = self._rooms.get(code)
-            if is_host:
-                if room is not None and room.host_sid:
-                    return 409, {"error": "该房间已被开启"}
-                if len(self._rooms) >= self._max_rooms:
-                    return 503, {"error": "房间数量已达上限"}
-                auth_key = _unhex(payload.get("auth_key"), _AUTH_KEY_BYTES)
-                if auth_key is None:
-                    return 400, {"error": "缺少或非法的 auth_key"}
-                sid = secrets.token_hex(16)
-                room = Room(
-                    code=code,
-                    auth_key=auth_key,
-                    host_sid=sid,
-                    world=str(payload.get("world") or "")[:64],
-                    port=_as_port(payload.get("port")),
-                    last_seen=now,
-                )
-                room.peers[sid] = Peer(sid=sid, pub=_norm_pub(pub_hex), addr=addr,
-                                       world=room.world, port=room.port, last_seen=now)
-                self._rooms[code] = room
-                return 200, {
-                    "sid": sid,
-                    "host": room.host_sid,
-                    "peers": [p.as_roster() for p in room.peers.values()],
-                    "relay": self.relay_info(),
-                }
-            # 加入者
+            if key in self._rooms and self._rooms[key].host_sid:
+                return 409, {"error": "该房间已开放"}
+            if len(self._rooms) >= self._max_rooms:
+                return 503, {"error": "房间数量已达上限"}
+            sid = secrets.token_hex(16)
+            room = Room(
+                code=key,
+                auth_key=auth_key,
+                host_sid=sid,
+                display=name.strip()[:64],
+                owner=device,
+                world=str(payload.get("world") or "")[:64],
+                port=_as_port(payload.get("port")),
+                last_seen=now,
+            )
+            room.peers[sid] = Peer(sid=sid, pub=_norm_pub(pub_hex), addr=addr,
+                                   world=room.world, port=room.port, last_seen=now)
+            self._rooms[key] = room
+        if self.db is not None:
+            self.db.touch_open(key)
+        return 200, {
+            "sid": sid,
+            "host": room.host_sid,
+            "peers": [p.as_roster() for p in room.peers.values()],
+            "relay": self.relay_info(),
+        }
+
+    # -------------------------------------------------------------- /p2p/join
+    def _join(self, name: str, payload: dict[str, Any], client: Any) -> tuple[int, dict]:
+        """加入者凭 proof 进入已开放的会话；房间不存在或未开放一律报错，绝不自动建房。"""
+        key = name.strip().lower()
+        pub_hex = payload.get("client_pub")
+        nonce_hex = payload.get("nonce")
+        proof_hex = payload.get("proof")
+        addr = _client_addr(client)
+        now = time.time()
+        with self._lock:
+            self._prune(now)
+            room = self._rooms.get(key)
             if room is None:
-                return 404, {"error": "房间未开启或已过期"}
+                return 404, {"error": "房间未开放或已过期"}
             if not verify_proof(room.auth_key, pub_hex, nonce_hex, proof_hex):
-                return 403, {"error": "准入校验失败（密钥或房间码不符）"}
+                return 403, {"error": "准入校验失败（密码或房间名不符）"}
             if len(room.peers) >= self._MAX_PEERS:
                 return 503, {"error": "房间人数已满"}
             sid = secrets.token_hex(16)
@@ -226,6 +312,7 @@ class SignalingRouter:
 
     # ---------------------------------------------------------- /p2p/announce
     def _announce(self, code: str, payload: dict[str, Any], client: Any) -> tuple[int, dict]:
+        code = code.strip().lower()
         sid = _clamp_sid(payload.get("sid"))
         if not sid:
             return 400, {"error": "缺少会话标识"}
@@ -251,6 +338,7 @@ class SignalingRouter:
 
     # ------------------------------------------------------------- /p2p/relay
     def _relay(self, code: str, payload: dict[str, Any], client: Any) -> tuple[int, dict]:
+        code = code.strip().lower()
         sid = _clamp_sid(payload.get("sid"))
         target = _clamp_sid(payload.get("peer"))
         if not sid or not target:
@@ -272,6 +360,7 @@ class SignalingRouter:
 
     # ------------------------------------------------------------- /p2p/leave
     def _leave(self, code: str, payload: dict[str, Any], client: Any) -> tuple[int, dict]:
+        code = code.strip().lower()
         sid = _clamp_sid(payload.get("sid"))
         now = time.time()
         with self._lock:

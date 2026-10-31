@@ -20,7 +20,7 @@ from typing import Any, Iterable
 
 __all__ = ["Database", "SCHEMA_VERSION"]
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 #: 热度里「近 24h 平均在线」的统计窗口（秒）
 _ONLINE_WINDOW = 24 * 3600
@@ -70,6 +70,14 @@ CREATE TABLE IF NOT EXISTS servers_state (
     updated_at  REAL    NOT NULL DEFAULT 0,
     PRIMARY KEY (host, port)
 );
+CREATE TABLE IF NOT EXISTS p2p_rooms (
+    name       TEXT    NOT NULL PRIMARY KEY,   -- 规范化小写房间名，全局唯一
+    display    TEXT    NOT NULL DEFAULT '',    -- 原始大小写展示名
+    owner      TEXT    NOT NULL DEFAULT '',    -- 创建者 device_id
+    created_at REAL    NOT NULL DEFAULT 0,
+    last_open  REAL    NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS ix_p2p_rooms_owner ON p2p_rooms (owner);
 """
 
 
@@ -181,6 +189,85 @@ class Database:
             self._conn.execute(
                 "UPDATE servers SET enabled=? WHERE host=? AND port=?",
                 (1 if enabled else 0, host, int(port)),
+            )
+            self._conn.commit()
+
+    # -------------------------------------------------------- 离线联机房间（持久登记）
+    def count_rooms(self, owner: str) -> int:
+        owner = str(owner or "").strip()
+        with self._lock:
+            return int(
+                self._conn.execute(
+                    "SELECT COUNT(*) c FROM p2p_rooms WHERE owner=?", (owner,)
+                ).fetchone()["c"]
+            )
+
+    def create_room(self, name: str, display: str, owner: str, *, max_per_device: int) -> str:
+        """登记一个新房间。返回 ``"ok"`` / ``"exists"``（名字全局重复）/ ``"quota"``（超每设备上限）。
+
+        名字不区分大小写全局唯一（主键存小写）；密码 / auth_key **绝不入库**。
+        先判名字冲突（409）再判配额（403）；配额只算该设备**现存**（未删除）房间。
+        """
+        key = str(name or "").strip().lower()
+        owner = str(owner or "").strip()
+        now = time.time()
+        with self._lock:
+            if self._conn.execute(
+                "SELECT 1 FROM p2p_rooms WHERE name=?", (key,)
+            ).fetchone() is not None:
+                return "exists"
+            used = int(
+                self._conn.execute(
+                    "SELECT COUNT(*) c FROM p2p_rooms WHERE owner=?", (owner,)
+                ).fetchone()["c"]
+            )
+            if used >= max(0, int(max_per_device)):
+                return "quota"
+            try:
+                self._conn.execute(
+                    "INSERT INTO p2p_rooms(name, display, owner, created_at, last_open)"
+                    " VALUES (?,?,?,?,?)",
+                    (key, str(display or name or "").strip()[:64], owner, now, 0),
+                )
+                self._conn.commit()
+            except sqlite3.IntegrityError:
+                return "exists"
+            return "ok"
+
+    def get_room(self, name: str) -> dict | None:
+        key = str(name or "").strip().lower()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT name, display, owner, created_at, last_open FROM p2p_rooms WHERE name=?",
+                (key,),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def list_rooms(self, owner: str) -> list[dict]:
+        owner = str(owner or "").strip()
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT name, display, created_at, last_open FROM p2p_rooms WHERE owner=?"
+                " ORDER BY created_at DESC",
+                (owner,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def delete_room(self, name: str, owner: str) -> bool:
+        key = str(name or "").strip().lower()
+        owner = str(owner or "").strip()
+        with self._lock:
+            cur = self._conn.execute(
+                "DELETE FROM p2p_rooms WHERE name=? AND owner=?", (key, owner)
+            )
+            self._conn.commit()
+            return cur.rowcount > 0
+
+    def touch_open(self, name: str) -> None:
+        key = str(name or "").strip().lower()
+        with self._lock:
+            self._conn.execute(
+                "UPDATE p2p_rooms SET last_open=? WHERE name=?", (time.time(), key)
             )
             self._conn.commit()
 

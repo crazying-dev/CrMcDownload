@@ -31,14 +31,16 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _build_p2p(settings: Settings) -> tuple["SignalingRouter | None", "RelayServer | None"]:
-    """启用离线联机时构造信令 + 中继；否则 ``(None, None)``。"""
+def _build_p2p(
+    settings: Settings, db: Database
+) -> tuple["SignalingRouter | None", "RelayServer | None"]:
+    """启用离线联机时构造信令 + 中继；否则 ``(None, None)``。信令需 ``db`` 做房间持久登记。"""
     if not getattr(settings, "p2p_enable", False):
         return None, None
     from server_mirror.p2p import RelayServer, SignalingRouter
 
     relay = RelayServer(settings)
-    p2p_router = SignalingRouter(settings=settings, relay=relay)
+    p2p_router = SignalingRouter(settings=settings, relay=relay, db=db)
     return p2p_router, relay
 
 
@@ -78,7 +80,7 @@ def main(argv: list[str] | None = None) -> int:
         cache_stats=None,
         probe_status=probe.status if probe else None,
     )
-    p2p_router, relay = _build_p2p(settings)
+    p2p_router, relay = _build_p2p(settings, db)
     router.p2p = p2p_router
     server = MirrorHTTPServer(
         (settings.host, settings.port), settings, router=router, db=db, probe=probe, relay=relay

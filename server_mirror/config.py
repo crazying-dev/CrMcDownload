@@ -86,10 +86,14 @@ class Settings:
     p2p_relay_host: str = ""
     #: 同时在途的房间上限（内存态，防滥用）
     p2p_max_rooms: int = 256
+    #: 每台设备（device_id）可持久创建的房间上限（现存未删除数）
+    p2p_max_rooms_per_device: int = 10
     #: 房间/成员空闲多久后被回收（秒）
     p2p_room_ttl: int = 180
     #: 单条中继连接累计转发字节上限（超限断开，避免沦为开放中继）
     p2p_relay_bytes_cap: int = 512 * 1024 * 1024
+    #: 官方特权插件（离线联机）可下载包的存放目录（GET /plugin/* 从此读取）
+    plugin_dir: Path = Path("./plugins")
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> "Settings":
@@ -124,8 +128,10 @@ class Settings:
             p2p_relay_port=_int(env, "MIRROR_P2P_RELAY_PORT", 25577),
             p2p_relay_host=(env.get("MIRROR_P2P_RELAY_HOST", "").strip()),
             p2p_max_rooms=_int(env, "MIRROR_P2P_MAX_ROOMS", 256),
+            p2p_max_rooms_per_device=_int(env, "MIRROR_P2P_MAX_ROOMS_PER_DEVICE", 10),
             p2p_room_ttl=_int(env, "MIRROR_P2P_ROOM_TTL", 180),
             p2p_relay_bytes_cap=_int(env, "MIRROR_P2P_RELAY_BYTES_CAP", 512 * 1024 * 1024),
+            plugin_dir=Path(env.get("MIRROR_PLUGIN_DIR", "./plugins")),
         )
 
     @property

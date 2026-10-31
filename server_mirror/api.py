@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import parse_qs, unquote
 
@@ -54,6 +55,7 @@ class ApiRouter:
             clean.startswith("/api/")
             or clean.startswith("/skin/")
             or clean.startswith("/p2p/")
+            or clean.startswith("/plugin/")
             or clean == "/page"
             or clean.startswith("/page/")
         )
@@ -79,6 +81,8 @@ class ApiRouter:
             return self._serve_skin(method, path, params, headers, body)
         if path.startswith("/p2p/"):
             return self._serve_p2p(method, path, headers, body, client)
+        if path.startswith("/plugin/"):
+            return self._serve_plugin(method, path)
         if path.startswith("/api/"):
             return self._serve_api(method, path, params, headers, body)
         return _err(404, "未知接口")
@@ -100,6 +104,32 @@ class ApiRouter:
             return _err(400, "请求体不是合法 JSON")
         status, data = self.p2p.handle(path, payload, client)
         return _json(status, data)
+
+    # --------------------------------------------------------------- /plugin
+    _PLUGIN_FILES = {
+        "offline-multiplayer.manifest.json": ("application/json; charset=utf-8", "public, max-age=60"),
+        "offline-multiplayer.zip": ("application/zip", "public, max-age=60"),
+    }
+
+    def _serve_plugin(self, method: str, path: str):
+        """官方特权插件按需下载：GET-only，免令牌，文件来自 ``plugin_dir``。"""
+        if method not in ("GET", "HEAD"):
+            return _err(405, "方法不允许")
+        tail = path[len("/plugin/"):]
+        if ".." in tail or "/" in tail:
+            return _err(400, "非法插件路径")
+        meta = self._PLUGIN_FILES.get(tail)
+        if meta is None:
+            return _err(404, "未知插件")
+        plugin_dir = getattr(self.settings, "plugin_dir", None)
+        if not plugin_dir:
+            return _err(404, "插件下载未配置")
+        file_path = Path(plugin_dir) / tail
+        if not file_path.is_file():
+            return _err(404, "插件不存在")
+        data = file_path.read_bytes()
+        ctype, cache = meta
+        return 200, {"Content-Type": ctype, "Cache-Control": cache}, data
 
     # --------------------------------------------------------------- /api
     def _serve_api(self, method: str, path: str, params: dict[str, str], headers: dict[str, str], body):
