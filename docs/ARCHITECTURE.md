@@ -212,14 +212,39 @@ GitHub 及其 CDN 主机；`check_url(url, allow_untrusted=False)` 返回中文�
 
 ```
 offcraft/plugins/
-  base.py      PluginManifest(frozen) + Plugin 协议；PLUGIN_API 主版本门控
+  base.py      PluginManifest(frozen) + Plugin 协议；PLUGIN_API 主版本门控；能力白名单含
+               net.tunnel（离线联机特权，validate() 强制「仅 official=True 可声明」）
   context.py   PluginContext 只暴露白名单能力：config 命名空间(plugins.<id>.)/notice/log/
                register_nav_item/register_task/instance_list/download_file(内部强制过 trust+镜像)
-  registry.py  从 builtin/ 按 import 白名单发现官方插件；启停持久化 plugins.json（原子写）
+               以及 p2p_open_tunnel()（net.tunnel 声明位，返回「允许联网」标记，不给宿主网络对象）
+  bundle.py    已下载官方插件包的落地与完整性：install_zip 先校 zip sha256（下载时）、
+               verify_bundle 逐文件重算 sha256 比对 installed.json（加载时）；禁路径穿越
+  registry.py  内置按 import 白名单发现 + 扫描 config_dir()/plugins/<id>/ 的第一方 bundle（校验
+               通过才 spec_from_file_location 加载、把目录插入 sys.path）；启停持久化 plugins.json
   builtin/diagnostics.py  示例官方插件（capability mirror_probe），聚合连通性自检卡片
 ```
 
 不给原始 `MainWindow`、不给任意文件写、不给裸网络接口；第三方目录扫描留 TODO 且不执行。
+
+### 离线联机 = 特权官方插件 `offline-multiplayer`（按需下载）
+
+- **能力例外**：`net.tunnel` 是**仅官方、经镜像 sha256 校验**的显式特权能力——离线联机引擎用标准库
+  `socket` 直连中继（数据面端到端加密，服务端只见密文）；这是插件沙箱「禁裸网络」的唯一官方例外，
+  第三方动态加载始终禁止。入口只在「插件」页一张专用卡片（下载 → 启用 → 进入），不加顶层导航。
+- **按需下载**：基础安装包 `excludes` 掉纯 Python 引擎 `offcraft.p2p`（`CrMCDownload.spec` /
+  `OffCraftDebug.spec`）；`devtools/build_mp_plugin.py` 把 `offcraft/p2p/*` 重排为顶层包 `offcraft_p2p` +
+  插件入口 `plugin_main.py` + 包内 `manifest.json` 打成 zip，并产出 `sha256/size/abi` 描述符供服务端
+  `GET /plugin/offline-multiplayer.{manifest.json,zip}` 下发。面板经 `_engine()` 解析（优先 `offcraft_p2p`，
+  回落 `offcraft.p2p` 便于开发/测试），故基础包不含引擎也能按需加载。
+- **nacl 后备**：Phase 0 冻结环境加载外部 `.pyd` 的权威判定留待打包验证；未确证前 `pynacl`/libsodium
+  仍随基础包保留（hiddenimports 不动），只按需下载纯代码——满足「功能选择性下载」，暂不省体积。
+- **房间语义**：`房间码+预共享密钥` → `房间名(全局唯一、不区分大小写)+密码`；生命周期
+  `创建`(服务端登记，全局唯一名 + 每设备现存<10) / `开放`(房主开实时会话) / `加入`(仅连已开放会话，
+  绝不自动建房) / `删除`(房主删，释放名额)。
+- **机器绑定存储**：加入成功后把房间名+密码经 **Windows DPAPI**（per-user+per-machine，`CryptProtectData`）
+  加密存本地，非 Windows/失败回落首启随机 `machine.key` + `SecretBox`（见 `p2p/vault.py`）。**局限**：
+  同账户同机可还原明文；重装/清配置会重置 `p2p_device_id`（配额与设备身份均为软约束）。设备身份与
+  密码/auth_key 都不入库、不上传明文，准入仍靠 `proof` HMAC。
 
 ## 启动耗时与可观测性（0.6.0）
 

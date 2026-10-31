@@ -41,7 +41,8 @@
   在线人数 / 延迟，支持刷新、复制地址、详情、加入游戏（≥1.20.2 直连，否则复制地址提示手动添加）
 - **下载中心**：游戏版本（正式版 / 快照 / 远古版 / 已安装，支持搜索与安装最新版）、
   模组 / 整合包 / 资源包 / 光影（Modrinth 搜索 → 详情 → 版本 → 一键安装）、Java（Mojang 官方 java-runtime）
-- **插件**：仅官方内置插件（capability 白名单，不加载第三方代码），示例插件「连通性自检」；其余分区保留框架
+- **插件**：仅官方插件（capability 白名单，不加载第三方代码），示例插件「连通性自检」；
+  「离线联机」为特权官方插件，基础包不内置、按需下载后在插件页卡片启用进入（见下）；其余分区保留框架
 - **设置**：游戏目录、版本隔离、Java（自动检测 / 手动添加）、内存、JVM 参数、
   下载源（只读，按 F12 才能改），不再提供日志查看入口
 - 底部任务面板与状态栏（连接状态、下载源、实例统计）
@@ -135,8 +136,17 @@
   供后续接外置登录（LittleSkin / authlib-injector）。
 - **启动提速**：Java 探测磁盘缓存、natives 与 classpath 并行、版本解析 LRU、页面懒构建（首屏只造启动页）、
   分段启动埋点；已安装实例的启动路径保持零网络。
-- **插件接口雏形**：仅官方内置插件 + capability 白名单，禁止动态加载第三方代码；示例官方插件 `diagnostics`
+- **插件接口雏形**：仅官方插件 + capability 白名单，禁止动态加载第三方代码；示例官方插件 `diagnostics`
   在设置页输出「连通性自检」卡片，插件页渲染已加载的官方插件。
+- **离线联机（插件，按需下载）**：跨网直连联机改造为特权官方插件 `offline-multiplayer`，声明新能力
+  `net.tunnel`（引擎用标准库 `socket` 直连中继，数据面端到端加密，服务端只见密文、不解密、不持明文）。
+  基础安装包 `excludes` 掉纯 Python 引擎，启用时从服务端 `GET /plugin/offline-multiplayer.{manifest.json,zip}`
+  按需下载、逐文件 sha256 校验后加载；**入口只在「插件」页一张专用卡片**（下载 → 启用 → 进入），不加顶层导航，
+  第三方动态加载始终禁止。房间语义由 `房间码+预共享密钥` 改为 **`房间名`（全局唯一、不区分大小写）+ `密码`**，
+  生命周期 `创建`（服务端登记，每设备最多 10 个）/ `开放`（房主开实时会话）/ `加入`（仅连已开放会话，绝不自动建房）/
+  `删除`（房主删、释放名额）；设备身份 = 客户端首启稳定随机 `p2p_device_id`（软约束）。加入成功后把房间名+密码经
+  **Windows DPAPI**（per-user+per-machine）加密存本地，非 Windows/失败回落首启随机 `machine.key`；同账户同机可还原
+  明文、重装会重置设备 id 为已知局限。UI 全程不暴露 `mc.yjlt.top`/中继地址，准入仍靠 `proof` HMAC。
 - **Web 可视化看板**：`server/page`（Vue 3 + Vite + vue-router，仅这两个运行时依赖、图表自绘 SVG）的构建产物
   由镜像服务在 `/page` 直出，含概览 / 缓存 / 下载热度 / 联机 / 皮肤五个页面；`dist` 缺失时 `/page` 返回 404，
   不影响其它路由。
@@ -168,7 +178,9 @@ curl http://127.0.0.1:8081/health
 
 路由：`/meta` `/data` `/libs` `/assets` `/fabric` `/fabricmaven` `/forgemaven` `/neoforgemaven`
 `/modrinth` `/modcdn`，另带 `/health` 与 `/metrics`；0.6.0 新增 `/api/servers/*`、`/api/stats/*`、`/api/skins/status`
-（联机榜单与看板数据，读接口免令牌）、`/skin/<name>.png`（皮肤托管）与 `/page`（Web 看板静态资源）。
+（联机榜单与看板数据，读接口免令牌）、`/skin/<name>.png`（皮肤托管）、`/page`（Web 看板静态资源），
+以及 `/plugin/offline-multiplayer.{manifest.json,zip}`（离线联机特权插件按需下载，免令牌、只读、防路径穿越，
+文件由 `devtools/build_mp_plugin.py` 产出到 `MIRROR_PLUGIN_DIR`）。`/p2p/*` 为中继信令控制面（数据面走独立 TCP 中继端口）。
 带查询串的请求（如 Modrinth 搜索）会完整转发并以 `.q<sha1>` 区分缓存；
 maven 路由下的 `*.xml` 索引按元数据 TTL 缓存，jar 长期缓存。
 
