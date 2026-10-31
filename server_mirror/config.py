@@ -66,6 +66,18 @@ class Settings:
     upstream_wait: float = 30.0
     #: 过期缓存清理的最小间隔（秒）
     sweep_interval: float = 300.0
+    #: 联机数据层（SQLite）路径
+    db_path: Path = Path("./data/mirror.db")
+    #: 内置热门服务器种子文件
+    popular_data: Path = Path("./data/popular_servers.json")
+    #: 皮肤文件根目录
+    skins_dir: Path = Path("./skins")
+    #: Web 看板构建产物目录（pnpm build 的 dist）
+    page_dir: Path = Path("./page/dist")
+    #: 后台探测间隔（秒）
+    probe_interval: int = 300
+    #: 是否启用后台探测
+    probe_enable: bool = True
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> "Settings":
@@ -88,6 +100,13 @@ class Settings:
             flight_wait=_float(env, "MIRROR_FLIGHT_WAIT", 60.0),
             upstream_wait=_float(env, "MIRROR_UPSTREAM_WAIT", 30.0),
             sweep_interval=_float(env, "MIRROR_SWEEP_INTERVAL", 300.0),
+            db_path=Path(env.get("MIRROR_DB_PATH", "./data/mirror.db")),
+            popular_data=Path(env.get("MIRROR_POPULAR_DATA", "./data/popular_servers.json")),
+            skins_dir=Path(env.get("MIRROR_SKINS_DIR", "./skins")),
+            page_dir=Path(env.get("MIRROR_PAGE_DIR", "./page/dist")),
+            probe_interval=_int(env, "MIRROR_SERVER_PROBE_INTERVAL", 300),
+            probe_enable=(env.get("MIRROR_SERVER_PROBE_ENABLE", "on").strip().lower()
+                          not in ("0", "false", "no", "off")),
         )
 
     @property

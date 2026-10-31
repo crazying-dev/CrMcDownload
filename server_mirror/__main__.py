@@ -6,8 +6,13 @@ import argparse
 import sys
 from pathlib import Path
 
+from server_mirror.api import ApiRouter
 from server_mirror.config import Settings
+from server_mirror.db import Database
 from server_mirror.proxy import MirrorHTTPServer
+from server_mirror.skins import SkinStore
+from server_mirror.servers import ServerProbe
+from server_mirror.static import StaticHandler
 
 __all__ = ["main"]
 
@@ -36,10 +41,40 @@ def main(argv: list[str] | None = None) -> int:
     if args.proxy:
         settings.proxy = args.proxy
 
-    server = MirrorHTTPServer((settings.host, settings.port), settings)
+    db = Database(settings.db_path)
+    skins = SkinStore(settings.skins_dir)
+    page = StaticHandler(settings.page_dir)
+    probe = (
+        ServerProbe(
+            db,
+            interval=settings.probe_interval,
+            concurrency=max(1, settings.max_upstreams),
+            popular_path=settings.popular_data,
+        )
+        if settings.probe_enable
+        else None
+    )
+    router = ApiRouter(
+        settings=settings,
+        db=db,
+        skins=skins,
+        page=page,
+        metrics_snapshot=None,   # 注入后填充
+        cache_stats=None,
+        probe_status=probe.status if probe else None,
+    )
+    server = MirrorHTTPServer(
+        (settings.host, settings.port), settings, router=router, db=db, probe=probe
+    )
+    # 指标与缓存统计需要 server 先存在，构造后再回填
+    router.metrics_snapshot = server.metrics.snapshot
+    router.cache_stats = server.cache.stats
+    if probe is not None:
+        probe.start()
     print(
         f"mirror listening on http://{settings.host}:{settings.port} "
-        f"cache={settings.cache_dir} token={'on' if settings.token else 'off'}",
+        f"cache={settings.cache_dir} token={'on' if settings.token else 'off'} "
+        f"db={settings.db_path} probe={'on' if probe else 'off'}",
         flush=True,
     )
     try:

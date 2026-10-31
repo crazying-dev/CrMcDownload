@@ -1,0 +1,22 @@
+{
+  "name": "offcraft-page",
+  "private": true,
+  "version": "0.6.0",
+  "type": "module",
+  "description": "CrMcDownload 镜像服务可视化看板（Vue 3 + vue-router，产物由服务端 /page 提供）",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc --noEmit && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "vue": "^3.4.0",
+    "vue-router": "^4.3.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.0.0",
+    "typescript": "^5.4.0",
+    "vite": "^5.2.0",
+    "vue-tsc": "^2.0.0"
+  }
+}

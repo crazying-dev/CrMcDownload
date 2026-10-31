@@ -21,6 +21,8 @@ from server_mirror.routes import BadPath, Route, resolve
 __all__ = ["Metrics", "MirrorHTTPServer", "MirrorHandler"]
 
 _CHUNK = 256 * 1024
+#: POST 请求体上限（皮肤 64 KiB，JSON 上报很轻；留一点余量）
+_MAX_BODY = 256 * 1024
 
 
 @dataclass
@@ -62,7 +64,16 @@ class Metrics:
 class MirrorHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, address, settings: Settings, cache: Cache | None = None) -> None:
+    def __init__(
+        self,
+        address,
+        settings: Settings,
+        cache: Cache | None = None,
+        *,
+        router=None,
+        db=None,
+        probe=None,
+    ) -> None:
         super().__init__(address, MirrorHandler)
         self.settings = settings
         self.cache = cache or Cache(
@@ -72,11 +83,21 @@ class MirrorHTTPServer(ThreadingHTTPServer):
         )
         self.metrics = Metrics()
         self.flight = SingleFlight()
+        self.router = router
+        self.db = db
+        self.probe = probe
         self.upstream_slots = (
             threading.BoundedSemaphore(settings.max_upstreams)
             if settings.max_upstreams > 0
             else None
         )
+
+    def server_close(self) -> None:  # noqa: D401 - 停后台线程并关库
+        if self.probe is not None:
+            self.probe.stop()
+        if self.db is not None:
+            self.db.close()
+        super().server_close()
 
 
 class MirrorHandler(BaseHTTPRequestHandler):
@@ -90,16 +111,34 @@ class MirrorHandler(BaseHTTPRequestHandler):
     def do_HEAD(self) -> None:  # noqa: N802
         self._dispatch(head_only=True)
 
+    def do_POST(self) -> None:  # noqa: N802
+        router = self.server.router
+        if router is not None and router.handles(self.path):
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                self._json(400, {"error": "invalid Content-Length"})
+                return
+            if length <= 0:
+                self._json(411, {"error": "missing Content-Length"})
+                return
+            if length > _MAX_BODY:
+                self._json(413, {"error": "body too large"})
+                return
+            body = self.rfile.read(length)
+            status, headers, out = router.dispatch("POST", self.path, dict(self.headers.items()), body)
+            self._respond(status, headers, out, head_only=False)
+            return
+        self._json(405, {"error": "method not allowed"})
+
     def log_message(self, fmt: str, *args) -> None:  # noqa: D401 - 静默访问日志
         if os.environ.get("MIRROR_VERBOSE"):
             super().log_message(fmt, *args)
 
     # -------------------------------------------------------------- routing
     def _dispatch(self, head_only: bool) -> None:
-        if not self._authorized():
-            self._json(403, {"error": "forbidden"})
-            return
-        if self.path == "/health":
+        clean = self.path.split("?", 1)[0]
+        if clean == "/health":
             self._json(
                 200,
                 {
@@ -109,8 +148,17 @@ class MirrorHandler(BaseHTTPRequestHandler):
                 },
             )
             return
-        if self.path == "/metrics":
+        if clean == "/metrics":
             self._text(200, "\n".join(f"{k} {v}" for k, v in self.server.metrics.snapshot().items()))
+            return
+        router = self.server.router
+        if router is not None and router.handles(self.path):
+            method = "HEAD" if head_only else self.command
+            status, headers, body = router.dispatch(method, self.path, dict(self.headers.items()), None)
+            self._respond(status, headers, body, head_only)
+            return
+        if not self._authorized():
+            self._json(403, {"error": "forbidden"})
             return
         try:
             route = resolve(self.path, self.server.settings.upstreams)
@@ -360,6 +408,16 @@ class MirrorHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         if self.command != "HEAD":
+            self.wfile.write(body)
+
+    def _respond(self, status: int, headers: dict, body: bytes, head_only: bool) -> None:
+        """把子系统返回的 (status, headers, body) 写回客户端。"""
+        self.send_response(status)
+        for name, value in (headers or {}).items():
+            self.send_header(name, str(value))
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        if not head_only and self.command != "HEAD":
             self.wfile.write(body)
 
     @staticmethod
