@@ -58,6 +58,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.proxy:
         settings.proxy = args.proxy
 
+    settings.prepare()  # 持久数据目录（默认 ../db/CrMcDownload）不存在就创建
     db = Database(settings.db_path)
     skins = SkinStore(settings.skins_dir)
     page = StaticHandler(settings.page_dir)

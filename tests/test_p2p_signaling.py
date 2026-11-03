@@ -213,3 +213,154 @@ def test_room_name_is_case_insensitive(router):
 def test_unknown_action_404(router):
     status, _ = router.handle("/p2p/nope", {"room": "R"}, CLIENT)
     assert status == 404
+
+
+def _join_one(router, code, auth_key):
+    pub = secrets.token_hex(32)
+    nonce = secrets.token_hex(16)
+    status, join = router.handle("/p2p/join", {
+        "room": code, "client_pub": pub, "nonce": nonce,
+        "proof": _joiner_proof(auth_key, pub, nonce),
+    }, CLIENT)
+    assert status == 200
+    return join["sid"]
+
+
+def test_open_returns_host_secret_not_in_roster(router):
+    _, data = _open_host(router, "ROOM1", secrets.token_bytes(32), pub=secrets.token_hex(32))
+    assert data.get("host_secret")
+    assert all("host_secret" not in p for p in data["peers"])   # 不进名册
+
+
+def test_roster_lists_members_and_requires_membership(router):
+    auth_key = secrets.token_bytes(32)
+    _, host = _open_host(router, "ROOM1", auth_key, pub=secrets.token_hex(32))
+    host_sid = host["host"]
+    _join_one(router, "ROOM1", auth_key)
+    status, roster = router.handle("/p2p/roster", {"room": "ROOM1", "sid": host_sid}, CLIENT)
+    assert status == 200 and len(roster["peers"]) == 2
+    status, _ = router.handle("/p2p/roster", {"room": "ROOM1", "sid": "deadbeef" * 4}, CLIENT)
+    assert status == 403
+
+
+def test_kick_requires_host_secret_and_host_sid(router):
+    auth_key = secrets.token_bytes(32)
+    _, host = _open_host(router, "ROOM1", auth_key, pub=secrets.token_hex(32))
+    host_sid, secret = host["host"], host["host_secret"]
+    joiner_sid = _join_one(router, "ROOM1", auth_key)
+    # 错误的 host_secret → 403
+    status, _ = router.handle("/p2p/kick", {
+        "room": "ROOM1", "sid": host_sid, "host_secret": "bad", "target": joiner_sid,
+    }, CLIENT)
+    assert status == 403
+    # 口令对但调用者不是 host_sid（加入者伪造）→ 403
+    status, _ = router.handle("/p2p/kick", {
+        "room": "ROOM1", "sid": joiner_sid, "host_secret": secret, "target": host_sid,
+    }, CLIENT)
+    assert status == 403
+
+
+def test_kick_removes_target_and_blocks_relay(router):
+    auth_key = secrets.token_bytes(32)
+    _, host = _open_host(router, "ROOM1", auth_key, pub=secrets.token_hex(32))
+    host_sid, secret = host["host"], host["host_secret"]
+    joiner_sid = _join_one(router, "ROOM1", auth_key)
+    status, data = router.handle("/p2p/kick", {
+        "room": "ROOM1", "sid": host_sid, "host_secret": secret, "target": joiner_sid,
+    }, CLIENT)
+    assert status == 200 and data["ok"] and data["kicked"] == joiner_sid
+    assert all(p["pid"] != joiner_sid for p in data["peers"])
+    # 被踢 sid 再用 relay → 403（已离名册 + blocked）
+    status, _ = router.handle("/p2p/relay", {
+        "room": "ROOM1", "sid": joiner_sid, "peer": host_sid,
+    }, CLIENT)
+    assert status == 403
+    # 不能踢自己
+    status, _ = router.handle("/p2p/kick", {
+        "room": "ROOM1", "sid": host_sid, "host_secret": secret, "target": host_sid,
+    }, CLIENT)
+    assert status == 400
+
+
+def test_kick_unknown_room_or_target(router):
+    status, _ = router.handle("/p2p/kick", {
+        "room": "GHOST", "sid": "a" * 32, "host_secret": "x", "target": "b" * 32,
+    }, CLIENT)
+    assert status == 404   # 房间未开放
+
+
+def _join_with_device(router, code: str, auth_key: bytes, device: str) -> tuple[int, dict]:
+    pub = secrets.token_hex(32)
+    nonce = secrets.token_hex(16)
+    return router.handle("/p2p/join", {
+        "room": code, "client_pub": pub, "nonce": nonce,
+        "proof": _joiner_proof(auth_key, pub, nonce), "device_id": device,
+    }, CLIENT)
+
+
+def test_kicked_device_cannot_rejoin_with_new_sid(router):
+    """踢出后按稳定 device_id 封禁：换新 sid / 新公钥也不能回来。"""
+    auth_key = secrets.token_bytes(32)
+    _, host = _open_host(router, "ROOM1", auth_key, pub=secrets.token_hex(32))
+    host_sid, secret = host["host"], host["host_secret"]
+    joiner_device = secrets.token_hex(16)
+    status, join = _join_with_device(router, "ROOM1", auth_key, joiner_device)
+    assert status == 200
+    status, _ = router.handle("/p2p/kick", {
+        "room": "ROOM1", "sid": host_sid, "host_secret": secret, "target": join["sid"],
+    }, CLIENT)
+    assert status == 200
+    # 同设备、新 sid、正确密码 → 仍被拒
+    status, data = _join_with_device(router, "ROOM1", auth_key, joiner_device)
+    assert status == 403
+    assert "移出" in data["error"]
+    # 另一台设备用正确密码 → 正常加入（封禁只针对设备，不封房间）
+    status, _ = _join_with_device(router, "ROOM1", auth_key, secrets.token_hex(16))
+    assert status == 200
+
+
+def test_rekey_rotates_key_and_evicts_all_but_host(router):
+    auth_key = secrets.token_bytes(32)
+    _, host = _open_host(router, "ROOM1", auth_key, pub=secrets.token_hex(32))
+    host_sid, secret = host["host"], host["host_secret"]
+    device = secrets.token_hex(16)
+    status, join = _join_with_device(router, "ROOM1", auth_key, device)
+    assert status == 200
+    new_key = secrets.token_bytes(32)
+    status, data = router.handle("/p2p/rekey", {
+        "room": "ROOM1", "sid": host_sid, "host_secret": secret, "auth_key": new_key.hex(),
+    }, CLIENT)
+    assert status == 200 and data["ok"] and data["removed"] == 1
+    assert [p["pid"] for p in data["peers"]] == [host_sid]
+    # 旧密码 proof 失效
+    status, _ = _join_with_device(router, "ROOM1", auth_key, device)
+    assert status == 403
+    # 新密码 + 之前被移出的设备也可以回来（rekey 清空设备封禁）
+    status, _ = _join_with_device(router, "ROOM1", new_key, device)
+    assert status == 200
+    # 旧 sid 已不在名册
+    status, _ = router.handle("/p2p/relay", {
+        "room": "ROOM1", "sid": join["sid"], "peer": host_sid,
+    }, CLIENT)
+    assert status == 403
+
+
+def test_rekey_requires_host_and_valid_key(router):
+    auth_key = secrets.token_bytes(32)
+    _, host = _open_host(router, "ROOM1", auth_key, pub=secrets.token_hex(32))
+    host_sid, secret = host["host"], host["host_secret"]
+    joiner_sid = _join_one(router, "ROOM1", auth_key)
+    status, _ = router.handle("/p2p/rekey", {
+        "room": "ROOM1", "sid": joiner_sid, "host_secret": secret,
+        "auth_key": secrets.token_bytes(32).hex(),
+    }, CLIENT)
+    assert status == 403
+    status, _ = router.handle("/p2p/rekey", {
+        "room": "ROOM1", "sid": host_sid, "host_secret": secret, "auth_key": "bad",
+    }, CLIENT)
+    assert status == 400
+    status, _ = router.handle("/p2p/rekey", {
+        "room": "GHOST", "sid": host_sid, "host_secret": secret,
+        "auth_key": secrets.token_bytes(32).hex(),
+    }, CLIENT)
+    assert status == 404

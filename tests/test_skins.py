@@ -100,3 +100,43 @@ def test_status_counts_files(store):
     status = store.status()
     assert status["count"] == 2
     assert status["last_updated"] > 0
+
+
+# ------------------------------------------------------- 默认皮肤 / 列表 / 删除
+def test_default_skin_is_valid_and_cached():
+    from server_mirror.default_skin import default_skin_bytes
+
+    data = default_skin_bytes()
+    image = Image.open(io.BytesIO(data))
+    assert image.size == (64, 64)
+    assert len(data) < MAX_SKIN_BYTES
+    assert default_skin_bytes() is default_skin_bytes()      # 进程内缓存同一对象
+
+
+def test_write_removes_opposite_model(store):
+    store.write("Steve", _png((64, 64)))
+    assert store.path_for("Steve", slim=False).is_file()
+    store.write("Steve", _png((64, 64), right_opaque=True), model="slim")
+    assert not store.path_for("Steve", slim=False).exists()
+    assert store.path_for("Steve", slim=True).is_file()
+
+
+def test_delete_removes_both_models(store):
+    store.write("Steve", _png((64, 64)))
+    store.write("Steve", _png((64, 64), right_opaque=True), model="slim")
+    # 直接构造出两套文件，模拟旧数据（正常 write 会互斥）
+    store.path_for("Steve", slim=False).write_bytes(_png((64, 64)))
+    store.path_for("Steve", slim=True).write_bytes(_png((64, 64)))
+    removed = store.delete("Steve")
+    assert sorted(removed) == ["Steve.png", "Steve_slim.png"]
+    assert store.delete("Steve") == []
+
+
+def test_list_orders_and_filters(store):
+    store.write("Steve", _png((64, 64)))
+    store.write("Alex", _png((64, 64)))
+    items = store.list()
+    assert {item["name"] for item in items} == {"Steve", "Alex"}
+    assert all(item["model"] == "classic" for item in items)
+    assert store.list(query="st")[0]["name"] == "Steve"
+    assert store.list(limit=1) and len(store.list(limit=1)) == 1

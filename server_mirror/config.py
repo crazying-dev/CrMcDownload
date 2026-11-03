@@ -29,6 +29,10 @@ def _float(env: dict[str, str], name: str, default: float) -> float:
     except ValueError:
         return default
 
+#: 默认持久数据根目录：与 server/ 同级的 db/CrMcDownload（没有会自动创建）。
+#: 数据库、皮肤、官方插件包、热门种子都放在这里，避免散落在部署目录里。
+DEFAULT_DATA_ROOT = Path("../db/CrMcDownload")
+
 DEFAULT_UPSTREAMS = {
     "meta": "https://piston-meta.mojang.com",
     "data": "https://piston-data.mojang.com",
@@ -66,12 +70,14 @@ class Settings:
     upstream_wait: float = 30.0
     #: 过期缓存清理的最小间隔（秒）
     sweep_interval: float = 300.0
+    #: 持久数据根目录（默认 ../db/CrMcDownload）
+    data_root: Path = DEFAULT_DATA_ROOT
     #: 联机数据层（SQLite）路径
-    db_path: Path = Path("./data/mirror.db")
+    db_path: Path = DEFAULT_DATA_ROOT / "mirror.db"
     #: 内置热门服务器种子文件
-    popular_data: Path = Path("./data/popular_servers.json")
+    popular_data: Path = DEFAULT_DATA_ROOT / "popular_servers.json"
     #: 皮肤文件根目录
-    skins_dir: Path = Path("./skins")
+    skins_dir: Path = DEFAULT_DATA_ROOT / "skins"
     #: Web 看板构建产物目录（pnpm build 的 dist）
     page_dir: Path = Path("./page/dist")
     #: 后台探测间隔（秒）
@@ -93,7 +99,7 @@ class Settings:
     #: 单条中继连接累计转发字节上限（超限断开，避免沦为开放中继）
     p2p_relay_bytes_cap: int = 512 * 1024 * 1024
     #: 官方特权插件（离线联机）可下载包的存放目录（GET /plugin/* 从此读取）
-    plugin_dir: Path = Path("./plugins")
+    plugin_dir: Path = DEFAULT_DATA_ROOT / "plugins"
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> "Settings":
@@ -103,6 +109,7 @@ class Settings:
             value = env.get(f"UPSTREAM_{key.upper()}")
             if value:
                 upstreams[key] = value.rstrip("/")
+        root = Path(env.get("MIRROR_DATA_DIR") or DEFAULT_DATA_ROOT)
         return cls(
             listen=env.get("MIRROR_LISTEN", "127.0.0.1:8081"),
             cache_dir=Path(env.get("MIRROR_CACHE_DIR", "./cache")),
@@ -116,9 +123,10 @@ class Settings:
             flight_wait=_float(env, "MIRROR_FLIGHT_WAIT", 60.0),
             upstream_wait=_float(env, "MIRROR_UPSTREAM_WAIT", 30.0),
             sweep_interval=_float(env, "MIRROR_SWEEP_INTERVAL", 300.0),
-            db_path=Path(env.get("MIRROR_DB_PATH", "./data/mirror.db")),
-            popular_data=Path(env.get("MIRROR_POPULAR_DATA", "./data/popular_servers.json")),
-            skins_dir=Path(env.get("MIRROR_SKINS_DIR", "./skins")),
+            data_root=root,
+            db_path=Path(env.get("MIRROR_DB_PATH") or root / "mirror.db"),
+            popular_data=Path(env.get("MIRROR_POPULAR_DATA") or root / "popular_servers.json"),
+            skins_dir=Path(env.get("MIRROR_SKINS_DIR") or root / "skins"),
             page_dir=Path(env.get("MIRROR_PAGE_DIR", "./page/dist")),
             probe_interval=_int(env, "MIRROR_SERVER_PROBE_INTERVAL", 300),
             probe_enable=(env.get("MIRROR_SERVER_PROBE_ENABLE", "on").strip().lower()
@@ -131,8 +139,19 @@ class Settings:
             p2p_max_rooms_per_device=_int(env, "MIRROR_P2P_MAX_ROOMS_PER_DEVICE", 10),
             p2p_room_ttl=_int(env, "MIRROR_P2P_ROOM_TTL", 180),
             p2p_relay_bytes_cap=_int(env, "MIRROR_P2P_RELAY_BYTES_CAP", 512 * 1024 * 1024),
-            plugin_dir=Path(env.get("MIRROR_PLUGIN_DIR", "./plugins")),
+            plugin_dir=Path(env.get("MIRROR_PLUGIN_DIR") or root / "plugins"),
         )
+
+    def prepare(self) -> None:
+        """创建持久数据目录（数据库 / 皮肤 / 插件 / 热门种子），幂等。"""
+        for directory in (
+            self.data_root,
+            self.db_path.parent,
+            self.popular_data.parent,
+            self.skins_dir,
+            self.plugin_dir,
+        ):
+            Path(directory).mkdir(parents=True, exist_ok=True)
 
     @property
     def host(self) -> str:

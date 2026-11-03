@@ -115,6 +115,16 @@ class MirrorHandler(BaseHTTPRequestHandler):
     def do_HEAD(self) -> None:  # noqa: N802
         self._dispatch(head_only=True)
 
+    def do_DELETE(self) -> None:  # noqa: N802
+        router = self.server.router
+        if router is not None and router.handles(self.path):
+            status, headers, out = router.dispatch(
+                "DELETE", self.path, dict(self.headers.items()), None, client=self.client_address
+            )
+            self._respond(status, headers, out, head_only=False)
+            return
+        self._json(405, {"error": "method not allowed"})
+
     def do_POST(self) -> None:  # noqa: N802
         router = self.server.router
         if router is not None and router.handles(self.path):

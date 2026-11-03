@@ -15,6 +15,7 @@ from typing import Any, Callable
 from urllib.parse import parse_qs, unquote
 
 from server_mirror.db import Database
+from server_mirror.default_skin import DEFAULT_SKIN_NAME, default_skin_bytes
 from server_mirror.skins import SkinError, SkinStore
 from server_mirror.ssrf_guard import ServerAddressError, parse_host_port
 
@@ -146,6 +147,12 @@ class ApiRouter:
         if path == "/api/skins/status":
             payload = self.skins.status() if self.skins else {}
             return _json(200, payload, extra_headers=_READ_CACHE)
+        if path == "/api/skins/list":
+            if self.skins is None:
+                return _err(404, "皮肤服务未启用")
+            limit = _clamp(params.get("limit"), 1, 200, 100)
+            items = self.skins.list(query=str(params.get("q") or "")[:32], limit=limit)
+            return _json(200, {"items": items, "count": len(items)}, extra_headers=_READ_CACHE)
         if path.startswith("/api/stats/"):
             return self._stats(path.rsplit("/", 1)[1])
         return _err(404, "未知接口")
@@ -227,11 +234,30 @@ class ApiRouter:
     def _serve_skin(self, method: str, path: str, params: dict[str, str], headers: dict[str, str], body):
         if self.skins is None:
             return _err(404, "皮肤服务未启用")
-        name = _skin_name(path)
+        try:
+            name = _skin_name(path)
+        except SkinError as exc:
+            return _err(400, str(exc))
         model = str(params.get("model") or "").lower()
         slim = model == "slim" or name.endswith("_slim")
+        auto_model = model in ("", "auto")
+        # 内置默认皮肤：任何账户缺图时都能拿到一张可用的贴图（?fallback=1）。
+        base_name = name[:-5] if name.endswith("_slim") else name
+        if base_name == DEFAULT_SKIN_NAME:
+            data = default_skin_bytes("slim" if slim else "classic")
+            return 200, {"Content-Type": "image/png", "Cache-Control": "public, max-age=86400"}, data
         if method in ("GET", "HEAD"):
             data = self.skins.read(name, slim=slim)
+            if data is None and auto_model:
+                # 没指定模型时 classic/slim 都试一次，客户端「自动判定」可直接取回。
+                data = self.skins.read(name, slim=True)
+            if data is None and params.get("fallback") in ("1", "true", "on"):
+                data = default_skin_bytes("slim" if slim else "classic")
+                return 200, {
+                    "Content-Type": "image/png",
+                    "Cache-Control": "public, max-age=300",
+                    "X-Skin-Fallback": "default",
+                }, data
             if data is None:
                 return _err(404, "没有该皮肤")
             return 200, {"Content-Type": "image/png", "Cache-Control": "public, max-age=300"}, data
@@ -243,6 +269,11 @@ class ApiRouter:
             except SkinError as exc:
                 return _err(400, str(exc))
             return _json(200, {"ok": True, "model": used, "width": width, "height": height})
+        if method == "DELETE":
+            if not self._authorized(headers):
+                return _err(403, "需要访问令牌")
+            removed = self.skins.delete(name)
+            return _json(200, {"ok": True, "removed": removed})
         return _err(405, "方法不允许")
 
 

@@ -51,7 +51,8 @@ curl http://127.0.0.1:8081/health
 | `/api/servers/report`（POST） | 客户端上报新服务器，需 `X-OffCraft-Token`，按 host 限流 |
 | `/api/stats/overview\|cache\|download\|servers` | Web 看板数据 |
 | `/api/skins/status` | 已存皮肤数与最近更新 |
-| `/skin/<name>.png`（GET/POST） | 皮肤托管（Pillow 校验；POST 需令牌） |
+| `/api/skins/list` | 皮肤库列表（`?q=&limit=`，按更新时间倒序，免令牌） |
+| `/skin/<name>.png`（GET/POST/DELETE） | 皮肤托管（Pillow 校验；POST/DELETE 需令牌）；`/skin/default.png` 返回内置默认皮肤，`?fallback=1` 缺图时回落默认 |
 | `/page`、`/page/<asset>` | Web 看板静态产物（`MIRROR_PAGE_DIR`，缺 `dist` 时 404） |
 
 - 查询串上限 2048 字节，拒绝反斜杠、NUL 等非法字符；
@@ -69,9 +70,11 @@ curl http://127.0.0.1:8081/health
 | `MIRROR_TOKEN` | 空 | 非空时校验 `X-OffCraft-Token` |
 | `MIRROR_METADATA_TTL` | `600` | 元数据 / Modrinth 响应缓存秒数 |
 | `MIRROR_MAX_CACHE_BYTES` | `0` | 缓存上限，0 = 不限 |
-| `MIRROR_DB_PATH` | `./data/mirror.db` | 联机 SQLite 路径 |
-| `MIRROR_POPULAR_DATA` | `./data/popular_servers.json` | 榜单为空时导入的种子 |
-| `MIRROR_SKINS_DIR` | `./skins` | 皮肤文件根目录 |
+| `MIRROR_DATA_DIR` | `../db/CrMcDownload` | 持久数据根目录（启动时自动创建） |
+| `MIRROR_DB_PATH` | `<DATA_DIR>/mirror.db` | 联机 SQLite 路径 |
+| `MIRROR_POPULAR_DATA` | `<DATA_DIR>/popular_servers.json` | 榜单为空时导入的种子 |
+| `MIRROR_SKINS_DIR` | `<DATA_DIR>/skins` | 皮肤文件根目录 |
+| `MIRROR_PLUGIN_DIR` | `<DATA_DIR>/plugins` | 官方特权插件包下发目录 |
 | `MIRROR_PAGE_DIR` | `./page/dist` | Web 看板构建产物目录 |
 | `MIRROR_SERVER_PROBE_INTERVAL` | `300` | 后台探测间隔（秒） |
 | `MIRROR_SERVER_PROBE_ENABLE` | `on` | 关闭则不启动探测线程 |
@@ -81,7 +84,7 @@ curl http://127.0.0.1:8081/health
 ## 测试
 
 ```bash
-uv run --group dev python -m pytest tests -q        # 90 项（含 0.6.0 的 db/api/skins/static/probe 测试）
+uv run --group dev python -m pytest tests -q        # 151 项（db/api/skins/settings/p2p/static/probe）
 uv run python -m unittest discover -s tests          # 既有 unittest 用例仍可直接跑
 ```
 

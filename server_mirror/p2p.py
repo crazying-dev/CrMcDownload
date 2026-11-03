@@ -78,6 +78,7 @@ class Peer:
     addr: str           # 观测到的公网 "ip:port"
     world: str = ""
     port: int = 0
+    device: str = ""    # 稳定设备标识：踢出后据此阻止同设备换 sid 重入
     last_seen: float = field(default_factory=time.time)
 
     def as_roster(self) -> dict[str, Any]:
@@ -93,10 +94,16 @@ class Room:
     owner: str = ""     # 创建者 device_id
     world: str = ""
     port: int = 0
+    #: 房主控制面口令：open 时随机生成、仅回给房主、不进名册；kick 用它鉴权（服务端强制「仅房主」）
+    host_secret: str = ""
     peers: dict[str, Peer] = field(default_factory=dict)
     created_at: float = field(default_factory=time.time)
     last_seen: float = field(default_factory=time.time)
     pending: dict[str, str] = field(default_factory=dict)  # sid -> 未领取的 relay token
+    #: 被踢出的 sid：拒绝其再用旧 sid 申请在途配对令牌
+    blocked: set[str] = field(default_factory=set)
+    #: 被踢出的设备：同一设备换新 sid 也不能重新加入（改密码/重开房间时清空）
+    blocked_devices: set[str] = field(default_factory=set)
 
 
 def _client_addr(client: Any) -> str:
@@ -184,6 +191,9 @@ class SignalingRouter:
             "announce": self._announce,
             "relay": self._relay,
             "leave": self._leave,
+            "roster": self._roster,
+            "kick": self._kick,
+            "rekey": self._rekey,
         }.get(action)
         if handler is None:
             return 404, {"error": "未知信令接口"}
@@ -268,16 +278,19 @@ class SignalingRouter:
                 owner=device,
                 world=str(payload.get("world") or "")[:64],
                 port=_as_port(payload.get("port")),
+                host_secret=secrets.token_hex(32),
                 last_seen=now,
             )
             room.peers[sid] = Peer(sid=sid, pub=_norm_pub(pub_hex), addr=addr,
-                                   world=room.world, port=room.port, last_seen=now)
+                                   world=room.world, port=room.port, device=device,
+                                   last_seen=now)
             self._rooms[key] = room
         if self.db is not None:
             self.db.touch_open(key)
         return 200, {
             "sid": sid,
             "host": room.host_sid,
+            "host_secret": room.host_secret,   # 仅回给房主，用于 kick 鉴权；不进名册
             "peers": [p.as_roster() for p in room.peers.values()],
             "relay": self.relay_info(),
         }
@@ -289,6 +302,7 @@ class SignalingRouter:
         pub_hex = payload.get("client_pub")
         nonce_hex = payload.get("nonce")
         proof_hex = payload.get("proof")
+        device = _norm_device(payload.get("device_id"))
         addr = _client_addr(client)
         now = time.time()
         with self._lock:
@@ -298,10 +312,14 @@ class SignalingRouter:
                 return 404, {"error": "房间未开放或已过期"}
             if not verify_proof(room.auth_key, pub_hex, nonce_hex, proof_hex):
                 return 403, {"error": "准入校验失败（密码或房间名不符）"}
+            if device and (device in room.blocked_devices
+                           or (payload.get("sid") and _clamp_sid(payload.get("sid")) in room.blocked)):
+                return 403, {"error": "你已被房主移出该房间，无法重新加入"}
             if len(room.peers) >= self._MAX_PEERS:
                 return 503, {"error": "房间人数已满"}
             sid = secrets.token_hex(16)
-            room.peers[sid] = Peer(sid=sid, pub=_norm_pub(pub_hex), addr=addr, last_seen=now)
+            room.peers[sid] = Peer(sid=sid, pub=_norm_pub(pub_hex), addr=addr,
+                                   device=device, last_seen=now)
             room.last_seen = now
             return 200, {
                 "sid": sid,
@@ -351,6 +369,8 @@ class SignalingRouter:
                 return 404, {"error": "房间未开启或已过期"}
             if sid not in room.peers or target not in room.peers:
                 return 403, {"error": "请求方或目标不在房间内"}
+            if sid in room.blocked or target in room.blocked:
+                return 403, {"error": "该成员已被移出房间"}
             if self.relay is None:
                 return 503, {"error": "中继未启用"}
             token = self.relay.new_token(code, requester=sid, target=target)
@@ -373,6 +393,101 @@ class SignalingRouter:
                 if not room.peers or room.host_sid == sid:
                     self._rooms.pop(code, None)
             return 200, {"ok": True}
+
+    # ------------------------------------------------------------- /p2p/roster
+    def _roster(self, name: str, payload: dict[str, Any], client: Any) -> tuple[int, dict]:
+        """当前会话在线名册：任何在房成员（sid∈peers）都可查（只读）。
+
+        名册只含 pid/addr/world/port——不暴露中继地址以外的服务端域名；addr 为对端观测地址，
+        供房主展示“成员 N”而非真实 IP（前端不直接展示 addr）。
+        """
+        key = name.strip().lower()
+        sid = _clamp_sid(payload.get("sid"))
+        now = time.time()
+        with self._lock:
+            self._prune(now)
+            room = self._rooms.get(key)
+            if room is None:
+                return 404, {"error": "房间未开放或已过期"}
+            if not sid or sid not in room.peers:
+                return 403, {"error": "不属于该房间"}
+            room.last_seen = now
+            return 200, {"peers": [p.as_roster() for p in room.peers.values()]}
+
+    # --------------------------------------------------------------- /p2p/kick
+    def _kick(self, name: str, payload: dict[str, Any], client: Any) -> tuple[int, dict]:
+        """房主踢出一个在线成员：服务端强制“仅房主”（host_secret + host_sid）。
+
+        从名册移除 target、挂入 blocked、清其在途配对令牌，并调 ``relay.evict`` 即时拆掉该
+        成员当前桥接（两端都断，房主/加入者的 ``forward()`` 因 EOF 自然收尾）。注：端到端模型
+        下无法区分同密码的新 sid 重连，若要禁止重加入需改密码（本轮不做）。
+        """
+        key = name.strip().lower()
+        now = time.time()
+        with self._lock:
+            self._prune(now)
+            room = self._rooms.get(key)
+            if room is None:
+                return 404, {"error": "房间未开放或已过期"}
+            secret = str(payload.get("host_secret") or "")
+            sid = _clamp_sid(payload.get("sid"))
+            if not secret or not room.host_secret or not sid or sid != room.host_sid:
+                return 403, {"error": "仅房主可操作"}
+            if not hmac.compare_digest(secret, room.host_secret):
+                return 403, {"error": "控制口令不符"}
+            target = _clamp_sid(payload.get("target"))
+            if not target or target not in room.peers:
+                return 404, {"error": "目标不在房间内"}
+            if target == room.host_sid:
+                return 400, {"error": "不能踢出自己"}
+            kicked = room.peers.pop(target, None)
+            room.blocked.add(target)
+            if kicked is not None and kicked.device:
+                room.blocked_devices.add(kicked.device)
+            room.last_seen = now
+            peers = [p.as_roster() for p in room.peers.values()]
+        if self.relay is not None:
+            self.relay.evict(key, target)
+        return 200, {"ok": True, "kicked": target, "peers": peers}
+
+    # --------------------------------------------------------------- /p2p/rekey
+    def _rekey(self, name: str, payload: dict[str, Any], client: Any) -> tuple[int, dict]:
+        """房主重置房间密码：更新 auth_key 并即时清出所有非房主成员。
+
+        密码只在房主本地派生，服务端只收到新的 auth_key。清空 blocked 列表，让房主可以
+        用新密码选择性邀请之前踢出的设备（旧成员不知道新密码，无法继续占用房间）。
+        """
+        key = name.strip().lower()
+        new_auth_key = _unhex(payload.get("auth_key"), _AUTH_KEY_BYTES)
+        if new_auth_key is None:
+            return 400, {"error": "缺少或非法的 auth_key"}
+        now = time.time()
+        removed: list[str] = []
+        with self._lock:
+            self._prune(now)
+            room = self._rooms.get(key)
+            if room is None:
+                return 404, {"error": "房间未开放或已过期"}
+            secret = str(payload.get("host_secret") or "")
+            sid = _clamp_sid(payload.get("sid"))
+            if not secret or not room.host_secret or not sid or sid != room.host_sid:
+                return 403, {"error": "仅房主可操作"}
+            if not hmac.compare_digest(secret, room.host_secret):
+                return 403, {"error": "控制口令不符"}
+            room.auth_key = new_auth_key
+            for peer_sid in list(room.peers):
+                if peer_sid != room.host_sid:
+                    room.peers.pop(peer_sid, None)
+                    removed.append(peer_sid)
+            room.pending.clear()
+            room.blocked.clear()
+            room.blocked_devices.clear()
+            room.last_seen = now
+            peers = [p.as_roster() for p in room.peers.values()]
+        if self.relay is not None:
+            for peer_sid in removed:
+                self.relay.evict(key, peer_sid)
+        return 200, {"ok": True, "peers": peers, "removed": len(removed)}
 
 
 def _room_pending(room: Room) -> dict[str, str]:
@@ -430,6 +545,8 @@ class RelayServer:
                                else max(60, getattr(settings, "p2p_room_ttl", 180)))
         self._tokens: dict[str, _Token] = {}
         self._pairs: dict[str, dict[str, Any]] = {}
+        #: (房间 code, sid) -> 参与该成员桥接的 StreamWriter 集合（一个桥两端都登记在双方 sid 下）
+        self._sid_writers: dict[tuple[str, str], set] = {}
         self._guard = threading.Lock()
         self._thread: threading.Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -549,13 +666,17 @@ class RelayServer:
             return
         # 后到的一侧：此刻消费令牌（一次性），取先到者成对，双方各回 OK，随后双向泵送
         self._tokens.pop(token, None)
-        await self._pair_and_bridge(reader, writer, existing)
+        await self._pair_and_bridge(reader, writer, existing, record)
 
     async def _pair_and_bridge(
-        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, first: dict[str, Any]
+        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
+        first: dict[str, Any], record: "_Token"
     ) -> None:
         first_reader: asyncio.StreamReader = first["reader"]
         first_writer: asyncio.StreamWriter = first["writer"]
+        sids = [record.requester, record.target]
+        writers = [writer, first_writer]
+        self._register(record.room, sids, writers)
         for side in (writer, first_writer):
             try:
                 side.write(b"OK\n")
@@ -566,7 +687,49 @@ class RelayServer:
         try:
             await self._bridge(reader, writer, first_reader, first_writer)
         finally:
+            self._unregister(record.room, sids, writers)
             first["done"].set()
+
+    # ------------------------------------------------------------ 桥接登记与驱逐
+    def _register(self, room: str, sids: list[str], writers: list) -> None:
+        with self._guard:
+            for s in sids:
+                if not s:
+                    continue
+                self._sid_writers.setdefault((room, s), set()).update(writers)
+
+    def _unregister(self, room: str, sids: list[str], writers: list) -> None:
+        with self._guard:
+            for s in sids:
+                if not s:
+                    continue
+                bucket = self._sid_writers.get((room, s))
+                if bucket is not None:
+                    bucket.difference_update(writers)
+                    if not bucket:
+                        self._sid_writers.pop((room, s), None)
+
+    def evict(self, room: str, sid: str) -> int:
+        """服务端侧即时拆桥：关掉登记在该 (room, sid) 的所有桥接套接字（两端），并清其在途令牌。
+
+        在信令线程调用，故通过 ``call_soon_threadsafe`` 回到事件循环关 writer（asyncio 对象非线程安全）。
+        返回关闭的套接字数。
+        """
+        with self._guard:
+            writers = list(self._sid_writers.pop((room, sid), set()))
+            dead = [t for t, rec in self._tokens.items()
+                    if rec.room == room and sid in (rec.requester, rec.target)]
+            for t in dead:
+                self._tokens.pop(t, None)
+        loop = self._loop
+        if loop is None:
+            return 0
+        for w in writers:
+            try:
+                loop.call_soon_threadsafe(self._close, w)
+            except RuntimeError:
+                pass
+        return len(writers)
 
     async def _bridge(self, r1, w1, r2, w2) -> None:
         cap = self.bytes_cap or (1 << 62)

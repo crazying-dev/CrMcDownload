@@ -13,7 +13,9 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-__all__ = ["MAX_SKIN_BYTES", "SkinError", "SkinStore", "NAME_PATTERN"]
+__all__ = ["MAX_SKIN_BYTES", "SkinError", "SkinStore", "NAME_PATTERN", "DEFAULT_SKIN_NAME"]
+
+from .default_skin import DEFAULT_SKIN_NAME
 
 #: Minecraft 玩家名规则（同时作为文件名，天然排除路径穿越）
 NAME_PATTERN = re.compile(r"^[A-Za-z0-9_]{1,16}$")
@@ -95,10 +97,56 @@ class SkinStore:
         width, height = _validate_png(data)
         slim = model == "slim" or (model == "auto" and _looks_slim(data))
         path = self.path_for(name, slim=slim)
+        # 同一账户只保留一种模型：切换 classic/slim 时清掉旧贴图，避免 GET 命中旧模型。
+        other = self.path_for(name, slim=not slim)
+        try:
+            other.unlink()
+        except OSError:
+            pass
         tmp = path.with_name(path.name + ".importing")
         tmp.write_bytes(data)
         Path(tmp).replace(path)
         return ("slim" if slim else "classic"), width, height
+
+    def delete(self, name: str) -> list[str]:
+        """删除该账户的皮肤（classic / slim 两种都删），返回实际删除的文件名。"""
+        self.check_name(name)
+        removed: list[str] = []
+        for slim in (False, True):
+            path = self.path_for(name, slim=slim)
+            try:
+                path.unlink()
+                removed.append(path.name)
+            except OSError:
+                pass
+        return removed
+
+    def list(self, *, query: str = "", limit: int = 100) -> list[dict[str, object]]:
+        """列出已存皮肤（按更新时间倒序），供客户端「皮肤库」浏览。"""
+        needle = str(query or "").strip().lower()
+        entries: list[dict[str, object]] = []
+        for path in self.root.glob("*.png"):
+            stem = path.stem
+            model = "slim" if stem.endswith("_slim") else "classic"
+            name = stem[:-5] if model == "slim" else stem
+            if not NAME_PATTERN.match(name):
+                continue
+            if needle and needle not in name.lower():
+                continue
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            entries.append(
+                {
+                    "name": name,
+                    "model": model,
+                    "size": int(stat.st_size),
+                    "updated": round(stat.st_mtime, 3),
+                }
+            )
+        entries.sort(key=lambda item: float(item["updated"]), reverse=True)
+        return entries[: max(1, min(int(limit), 200))]
 
     def status(self) -> dict[str, object]:
         files = list(self.root.glob("*.png"))
