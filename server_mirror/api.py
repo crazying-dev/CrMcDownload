@@ -59,6 +59,7 @@ class ApiRouter:
             or clean.startswith("/p2p/")
             or clean.startswith("/plugin/")
             or clean == "/update"
+            or clean == "/"
             or clean == "/page"
             or clean.startswith("/page/")
         )
@@ -78,6 +79,8 @@ class ApiRouter:
         raw_path, _, query = target.partition("?")
         path = unquote(raw_path)
         params = {k: v[0] for k, v in parse_qs(query, keep_blank_values=False).items()}
+        if path == "/":
+            return 302, {"Location": "/page/", "Cache-Control": "no-store"}, b""
         if path == "/page" or path.startswith("/page/"):
             return self._serve_page(path)
         if path == "/update":
