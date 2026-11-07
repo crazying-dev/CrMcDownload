@@ -201,6 +201,32 @@ pnpm build          # 产出 page/dist（base=/page/）
 | `MIRROR_P2P_RELAY_BYTES_CAP` | `536870912` | 单条中继连接累计转发字节上限（超限断开，避免开放中继） |
 | `MIRROR_PLUGIN_DIR` | `./plugins` | `GET /plugin/*` 读取的插件包目录（systemd/Docker 下建议绝对路径并挂载） |
 
+- **房主控制面（`/p2p/roster` `/p2p/kick`）**：`开放` 时服务端随机生成 `host_secret`、仅回给房主（不进名册）；
+  `kick` 服务端校验 `host_secret`+`host_sid` 后经 `RelayServer.evict()` 即时拆除该成员的中继桥并撤销在途令牌，
+  将 `sid` 加入 `room.blocked` 阻断其旧会话重连。踢出为「断开当前会话」、非永久封禁（被踢者持密码可重新 `加入`）。
+  控制面仍走同一 `POST /p2p/*`，**无新增端口/路由**。
+
+- **虚拟局域网（UDP 打洞 + 中继）**：开启后服务端额外启动 **UDP 边缘服务**（默认 `25578/udp`）。
+  vpnd 首包 `HELLO <edge_token>` 登记公网端点，双方每 500ms 发 PUNCH 打洞，6s 不通自动改为经边缘
+  `R <sid>` 转发密文；边缘与 TCP 中继一样**只见密文**。令牌绑定 房间+设备、TTL 180s，
+  长会话由 `/p2p/roster` 轮询自动续签。需在防火墙/安全组放行 **UDP 25578**；
+  TCP 中继 `25577` 保留，作为回滚路径。
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `MIRROR_P2P_VPN_ENABLE` | `on` | 虚拟局域网总开关；设 `off` 后不下发 `vip/edge_token`，客户端自动回落 TCP 隧道 |
+| `MIRROR_P2P_UDP_PORT` | `25578` | UDP 边缘监听端口（需单独放行 UDP） |
+| `MIRROR_P2P_UDP_BYTES_CAP` | `536870912` | 单会话 UDP 中继累计转发字节上限 |
+| `MIRROR_P2P_EDGE_TOKEN_TTL` | `180` | 边缘令牌有效期（秒），到期由名册轮询重新签发 |
+
+> **客户端前提**：虚拟局域网需要基础包内的 `vpnd.exe`（Wintun 数据面）。首次启用会弹出一次 UAC 安装；
+> 拒绝授权或驱动被安全软件拦截时，面板会提示并自动回落旧 TCP 隧道，不影响联机。
+> 卸载时主卸载程序会调用 `vpn-setup.exe /uninstall`，清理服务、虚拟网卡与防火墙规则。
+
+> **生效方式（三层产物联动）**：改服务端信令/中继代码（`server_mirror/p2p.py`，含 `kick`/`roster`/`evict`/`host_secret`）
+> 需 `git pull` 到部署目录后**重启进程**（`bash run.sh`，`.env` 经 `set -a` 注入）方生效；改动 `server/plugins/` 插件包
+> 或 `page/dist` 前端产物属**文件层**，替换即生效、**不需重启**；客户端引擎/UI 变更则随插件重下载/安装包发版。
+
 ## 备选：无子域名（独立端口）
 
 若暂时不能加 DNS，可让 Caddy 监听 `:8443` 并自签/使用已有证书：
