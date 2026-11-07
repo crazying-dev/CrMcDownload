@@ -6,7 +6,40 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-__all__ = ["Settings"]
+__all__ = ["Settings", "load_env_file"]
+
+
+def load_env_file(*paths: str | Path) -> dict[str, str]:
+    """把 ``.env`` 注入 ``os.environ``，让 ``uv run main.py`` 直接读到部署配置。
+
+    规则对齐 python-dotenv 的常见行为：忽略空行与 ``#`` 注释，支持 ``export``
+    前缀与成对的单/双引号；同一文件内后写的键生效；**已存在的环境变量不覆盖**
+    （systemd / Docker 注入的值优先）。文件不存在时静默跳过。
+    """
+    loaded: dict[str, str] = {}
+    for raw_path in paths:
+        try:
+            lines = Path(raw_path).read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        for raw in lines:
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("export "):
+                line = line[len("export "):].strip()
+            key, sep, value = line.partition("=")
+            if not sep:
+                continue
+            key = key.strip()
+            value = value.strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+                value = value[1:-1]
+            if key:
+                loaded[key] = value
+    for key, value in loaded.items():
+        os.environ.setdefault(key, value)
+    return loaded
 
 
 def _int(env: dict[str, str], name: str, default: int) -> int:

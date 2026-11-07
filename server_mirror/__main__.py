@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from server_mirror.api import ApiRouter
-from server_mirror.config import Settings
+from server_mirror.config import Settings, load_env_file
 from server_mirror.db import Database
 from server_mirror.proxy import MirrorHTTPServer
 from server_mirror.skins import SkinStore
@@ -50,6 +50,8 @@ def _build_p2p(
 
 
 def main(argv: list[str] | None = None) -> int:
+    # 手动 `uv run main.py` 时也能读到部署目录的 .env（systemd/Docker 注入优先）。
+    load_env_file(Path.cwd() / ".env", Path(__file__).resolve().parents[1] / ".env")
     args = build_parser().parse_args(argv)
     settings = Settings.from_env()
     if args.listen:
