@@ -224,7 +224,8 @@ pnpm build          # 产出 page/dist（base=/page/）
 > 卸载时主卸载程序会调用 `vpn-setup.exe /uninstall`，清理服务、虚拟网卡与防火墙规则。
 
 > **生效方式（三层产物联动）**：改服务端信令/中继代码（`server_mirror/p2p.py`，含 `kick`/`roster`/`evict`/`host_secret`）
-> 需 `git pull` 到部署目录后**重启进程**（`bash run.sh`，`.env` 经 `set -a` 注入）方生效；改动 `server/plugins/` 插件包
+> 需 `git pull` 到部署目录后**重启进程**方生效（`uv run main.py` 会自动读取仓库根目录 `.env`，
+> systemd/Docker 注入的环境变量优先，无需 `set -a; . .env`）；改动 `server/plugins/` 插件包
 > 或 `page/dist` 前端产物属**文件层**，替换即生效、**不需重启**；客户端引擎/UI 变更则随插件重下载/安装包发版。
 
 ## 备选：无子域名（独立端口）
