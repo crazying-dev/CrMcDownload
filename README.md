@@ -42,8 +42,13 @@ curl http://127.0.0.1:8081/health
 | `/neoforgemaven/` | `maven.neoforged.net` | NeoForge 版本索引与 jar |
 | `/modrinth/` | `api.modrinth.com` | 搜索 / 项目 / 版本（**保留查询串**） |
 | `/modcdn/` | `cdn.modrinth.com` | `.jar` / `.mrpack` / 图标 |
+| `/github/` | `github.com` | Releases 资产（客户端安装包），支持 `Range` 断点续传 |
 
-另有 `/health`、`/metrics`，以及 0.6.0 新增的、**由应用自身提供**（不走上游代理、不做 URL 改写）的端点：
+`/github/` 只允许 `github.com`、`api.github.com`、`*.githubusercontent.com` 三种跳转目标，
+GitHub 资产 302 到 `objects.githubusercontent.com` 时由服务端跟随（最多 3 跳），
+因此客户端可以只用镜像地址拿到安装包，并在断线后用 `Range` 续传。
+
+另有 `/health`、`/metrics`，以及 0.6.0 起**由应用自身提供**（不走上游代理、不做 URL 改写）的端点：
 
 | 端点 | 说明 |
 | --- | --- |
@@ -53,13 +58,24 @@ curl http://127.0.0.1:8081/health
 | `/api/skins/status` | 已存皮肤数与最近更新 |
 | `/api/skins/list` | 皮肤库列表（`?q=&limit=`，按更新时间倒序，免令牌） |
 | `/skin/<name>.png`（GET/POST/DELETE） | 皮肤托管（Pillow 校验；POST/DELETE 需令牌）；`/skin/default.png` 返回内置默认皮肤，`?fallback=1` 缺图时回落默认 |
-| `/page`、`/page/<asset>` | Web 看板静态产物（`MIRROR_PAGE_DIR`，缺 `dist` 时 404） |
+| `/update` | **301** 跳到 GitHub Releases 页面（`Location` 由 `MIRROR_UPDATE_*` 决定） |
+| `/api/update` | 版本与下载地址 JSON（`latest_version` / `min_version` / `force_update` / `mirror_download_url`），永不被版本门槛拦截 |
+| `/page`、`/page/<asset>` | 静态产物（`MIRROR_PAGE_DIR`，缺 `dist` 时 404）：`/page/` 是官网，`/page/status` 是运维看板 |
 
 - 查询串上限 2048 字节，拒绝反斜杠、NUL 等非法字符；
 - 带查询串的请求缓存键为 `<path>.q<sha1(查询串)[:16]>`，避免不同搜索命中同一缓存；
 - `meta` / `fabric` / `modrinth` 前缀按 `MIRROR_METADATA_TTL` 过期；maven 路由下 `*.xml`
   （`maven-metadata.xml`）也算元数据，其余 jar 长期缓存；
 - 未识别前缀 404，绝不回落到直连。
+
+### 版本门槛（0.7.0）
+
+客户端请求带 `X-OffCraft-Version`（兼容 `?v=`）时，若低于 `MIRROR_UPDATE_MIN_VERSION`：
+
+- `/api/*`、代理路由与 `/github/*` 返回 **426 Upgrade Required**，JSON 体与 `/api/update` 同构，
+  并附 `X-OffCraft-Min-Version`、`X-OffCraft-Latest-Version`、`X-OffCraft-Force-Update: 1`；
+- 未携带版本号、或版本号无法解析的请求一律放行（curl / 看板 / 旧客户端不受影响）；
+- `/update`、`/api/update`、`/health`、`/metrics`、`/page/*` 始终放行，保证旧客户端还能拿到升级信息。
 
 ## 配置（环境变量）
 
@@ -75,16 +91,37 @@ curl http://127.0.0.1:8081/health
 | `MIRROR_POPULAR_DATA` | `<DATA_DIR>/popular_servers.json` | 榜单为空时导入的种子 |
 | `MIRROR_SKINS_DIR` | `<DATA_DIR>/skins` | 皮肤文件根目录 |
 | `MIRROR_PLUGIN_DIR` | `<DATA_DIR>/plugins` | 官方特权插件包下发目录 |
-| `MIRROR_PAGE_DIR` | `./page/dist` | Web 看板构建产物目录 |
+| `MIRROR_PAGE_DIR` | `./page/dist` | 官网 + 看板构建产物目录 |
 | `MIRROR_SERVER_PROBE_INTERVAL` | `300` | 后台探测间隔（秒） |
 | `MIRROR_SERVER_PROBE_ENABLE` | `on` | 关闭则不启动探测线程 |
-| `UPSTREAM_META` / `_DATA` / `_LIBS` / `_ASSETS` / `_FABRIC` / `_FABRICMAVEN` / `_FORGEMAVEN` / `_NEOFORGEMAVEN` / `_MODRINTH` / `_MODCDN` | 官方地址 | 上游，可替换 |
+| `MIRROR_UPDATE_REPO` | `crazying-dev/CrMcDownload` | 发布仓库（`owner/repo`） |
+| `MIRROR_UPDATE_LATEST_VERSION` | `0.7.0` | 最新版本号，`/update` 与 `/api/update` 都读它 |
+| `MIRROR_UPDATE_MIN_VERSION` | 空 | 最低可用版本；空 = 不做版本门槛 |
+| `MIRROR_UPDATE_ENFORCE` | `on` | 关掉后即使低于最低版本也只提示不拒绝 |
+| `MIRROR_UPDATE_RELEASE_URL` | 空 | 自定义发布页地址；空 = `https://github.com/<repo>/releases/tag/v<latest>` |
+| `MIRROR_UPDATE_ASSET` | 空 | 安装包文件名，可用 `{version}` 占位；空 = `CrMCDownload-<latest>-win64-setup.exe` |
+| `UPSTREAM_META` / `_DATA` / `_LIBS` / `_ASSETS` / `_FABRIC` / `_FABRICMAVEN` / `_FORGEMAVEN` / `_NEOFORGEMAVEN` / `_MODRINTH` / `_MODCDN` / `_GITHUB` | 官方地址 | 上游，可替换 |
 | `UPSTREAM_PROXY` | 空 | 上游代理（如 `socks5h://127.0.0.1:1080`） |
+
+## 官网与看板（`page/`）
+
+`page/` 是 Vue 3 + Vite 工程，一次构建同时产出两份内容：官网（`/page/`、`/page/download`、
+`/page/changelog`、`/page/about`）与运维看板（`/page/status`）。构建设物直接提交到仓库，
+部署时不需要在服务器上装 Node：
+
+```bash
+cd page
+pnpm install            # 首次（pnpm 11，esbuild 构建白名单在 pnpm-workspace.yaml 的 allowBuilds）
+pnpm build              # 产出 page/dist，随提交一起推送
+```
+
+页面所有请求都会带 `X-OffCraft-Version`（取自 `package.json` 的 version，经 vite `define` 注入），
+因此最低版本策略对官网自身同样生效。
 
 ## 测试
 
 ```bash
-uv run --group dev python -m pytest tests -q        # 151 项（db/api/skins/settings/p2p/static/probe）
+uv run --group dev python -m pytest tests -q        # 164 项（db/api/skins/settings/p2p/probe/servers/static/update）
 uv run python -m unittest discover -s tests          # 既有 unittest 用例仍可直接跑
 ```
 

@@ -191,6 +191,10 @@ class MirrorProxyTest(unittest.TestCase):
             mirror = _Mirror(Path(tmp), max_cache_bytes=100000)
             try:
                 mirror.get("/libs/a.jar")
+                # 缓存提交发生在响应体写完之后，等它真正落盘再查 /health，避免竞态
+                deadline = time.time() + 2.0
+                while mirror.cache.total_bytes(refresh=True) < len(PAYLOAD) and time.time() < deadline:
+                    time.sleep(0.02)
                 conn = http.client.HTTPConnection("127.0.0.1", mirror.port, timeout=10)
                 conn.request("GET", "/health")
                 resp = conn.getresponse()

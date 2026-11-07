@@ -1,5 +1,5 @@
 node_modules/
-dist/
 *.local
 .DS_Store
 .vite/
+# dist/ 是源码的一部分：构建产物随源码提交，服务端直接读取

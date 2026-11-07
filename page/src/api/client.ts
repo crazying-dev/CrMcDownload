@@ -1,5 +1,22 @@
-// 看板取数：全部走相对路径 /api/...、/health，由 vite 开发代理或服务端同源提供。
+// 看板与官网取数：全部走相对路径 /api/...、/health，由 vite 开发代理或服务端同源提供。
 // 令牌不进前端（读接口免 token），因此这里不附带任何鉴权头。
+// 每个请求都带 X-OffCraft-Version，版本过低时服务端会返回 426。
+
+export const SITE_VERSION = __APP_VERSION__;
+
+export interface UpdatePayload {
+  ok?: boolean;
+  client_version?: string;
+  latest_version?: string;
+  min_version?: string;
+  force_update?: boolean;
+  release_url?: string;
+  download_url?: string;
+  mirror_download_url?: string;
+  asset?: { name?: string; size?: number | null };
+  error?: string;
+}
+
 
 export interface Metrics {
   hits?: number;
@@ -66,7 +83,10 @@ export interface Health {
 }
 
 async function getJSON<T>(path: string, signal?: AbortSignal): Promise<T> {
-  const response = await fetch(path, { headers: { Accept: "application/json" }, signal });
+  const response = await fetch(path, {
+    headers: { Accept: "application/json", "X-OffCraft-Version": SITE_VERSION },
+    signal,
+  });
   if (!response.ok) {
     throw new Error(`${response.status} ${response.statusText}`);
   }
@@ -74,6 +94,7 @@ async function getJSON<T>(path: string, signal?: AbortSignal): Promise<T> {
 }
 
 export const api = {
+  update: (signal?: AbortSignal) => getJSON<UpdatePayload>("/api/update", signal),
   health: (signal?: AbortSignal) => getJSON<Health>("/health", signal),
   overview: (signal?: AbortSignal) => getJSON<Overview>("/api/stats/overview", signal),
   cache: (signal?: AbortSignal) => getJSON<CacheStats>("/api/stats/cache", signal),

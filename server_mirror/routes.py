@@ -25,6 +25,7 @@ _PREFIXES = (
     "neoforgemaven",
     "modrinth",
     "modcdn",
+    "github",
 )
 _BAD_CHARS = re.compile(r"[\x00-\x1f\x7f\\]")
 _MAX_PATH = 2048

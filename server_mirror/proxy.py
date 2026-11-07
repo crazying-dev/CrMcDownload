@@ -17,6 +17,7 @@ from server_mirror.config import Settings
 from server_mirror.flight import SingleFlight
 from server_mirror.netproxy import open_upstream
 from server_mirror.routes import BadPath, Route, resolve
+from server_mirror.update import version_gate
 
 __all__ = ["Metrics", "MirrorHTTPServer", "MirrorHandler"]
 
@@ -178,6 +179,14 @@ class MirrorHandler(BaseHTTPRequestHandler):
         if not self._authorized():
             self._json(403, {"error": "forbidden"})
             return
+        # 版本门槛：低于最低版本的客户端直接 426（缺版本头的请求放行）
+        blocked = version_gate(
+            self.server.settings, dict(self.headers.items()), self.path.partition("?")[2]
+        )
+        if blocked is not None:
+            status, headers, body = blocked
+            self._respond(status, headers, body, head_only)
+            return
         try:
             route = resolve(self.path, self.server.settings.upstreams)
         except BadPath as exc:
@@ -317,6 +326,19 @@ class MirrorHandler(BaseHTTPRequestHandler):
             conn = open_upstream(upstream_url, self.server.settings.proxy, timeout=30)
             conn.request("GET", _path_of(upstream_url), headers=headers)
             resp = conn.getresponse()
+            # GitHub Releases 资产会 302 到 objects.githubusercontent.com，最多跟 3 跳
+            for _ in range(3):
+                location = resp.getheader("Location")
+                if resp.status not in (301, 302, 303, 307, 308) or not location:
+                    break
+                target = _redirect_target(upstream_url, location)
+                if target is None:
+                    break
+                conn.close()
+                upstream_url = target
+                conn = open_upstream(upstream_url, self.server.settings.proxy, timeout=30)
+                conn.request("GET", _path_of(upstream_url), headers=headers)
+                resp = conn.getresponse()
             if resp.status not in (200, 206):
                 body = resp.read(512).decode("utf-8", "replace")
                 self.server.metrics.error()
@@ -459,3 +481,17 @@ def _path_of(url: str) -> str:
     if parts.query:
         path += "?" + parts.query
     return path
+
+
+def _redirect_target(current: str, location: str) -> str | None:
+    """只跟随 GitHub 系重定向，避免被上游带去任意主机（SSRF）。"""
+    from urllib.parse import urljoin, urlsplit
+
+    target = urljoin(current, location)
+    parts = urlsplit(target)
+    if parts.scheme not in ("http", "https"):
+        return None
+    host = (parts.hostname or "").lower()
+    if host in ("github.com", "api.github.com") or host.endswith(".githubusercontent.com"):
+        return target
+    return None

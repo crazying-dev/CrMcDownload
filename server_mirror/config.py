@@ -48,6 +48,8 @@ DEFAULT_UPSTREAMS = {
     "modrinth": "https://api.modrinth.com",
     # Modrinth 文件 CDN（.jar / .mrpack / 图标）
     "modcdn": "https://cdn.modrinth.com",
+    # GitHub Releases 资产（客户端安装包镜像下载，支持 Range 断点续传）
+    "github": "https://github.com",
 }
 
 
@@ -98,8 +100,23 @@ class Settings:
     p2p_room_ttl: int = 180
     #: 单条中继连接累计转发字节上限（超限断开，避免沦为开放中继）
     p2p_relay_bytes_cap: int = 512 * 1024 * 1024
+    #: 虚拟局域网（VIP 分配 + UDP 边缘打洞/中继）：是否启用（关闭后客户端回落旧隧道）
+    p2p_vpn_enable: bool = True
+    #: UDP 边缘服务监听端口（数据面；HELLO 登记端点 + 按 sid 转发）
+    p2p_udp_port: int = 25578
+    #: 单个房间经 UDP 边缘累计转发字节上限（超限停止转发）
+    p2p_udp_bytes_cap: int = 512 * 1024 * 1024
+    #: edge_token 有效期（秒）：绑定 room+sid+device，到期由信令重新签发
+    p2p_edge_token_ttl: int = 180
     #: 官方特权插件（离线联机）可下载包的存放目录（GET /plugin/* 从此读取）
     plugin_dir: Path = DEFAULT_DATA_ROOT / "plugins"
+    #: 更新配置：GitHub 仓库、最新/最低版本、是否强制、发布页与安装包文件名
+    update_repo: str = "crazying-dev/CrMcDownload"
+    update_latest: str = "0.7.0"
+    update_min: str = ""          # 空 = 不强制更新
+    update_enforce: bool = True
+    update_release_url: str = ""  # 空 = 按仓库 + tag 拼 GitHub Releases 页面
+    update_asset: str = ""        # 空 = CrMCDownload-<version>-win64-setup.exe
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> "Settings":
@@ -139,7 +156,19 @@ class Settings:
             p2p_max_rooms_per_device=_int(env, "MIRROR_P2P_MAX_ROOMS_PER_DEVICE", 10),
             p2p_room_ttl=_int(env, "MIRROR_P2P_ROOM_TTL", 180),
             p2p_relay_bytes_cap=_int(env, "MIRROR_P2P_RELAY_BYTES_CAP", 512 * 1024 * 1024),
+            p2p_vpn_enable=(env.get("MIRROR_P2P_VPN_ENABLE", "on").strip().lower()
+                            not in ("0", "false", "no", "off")),
+            p2p_udp_port=_int(env, "MIRROR_P2P_UDP_PORT", 25578),
+            p2p_udp_bytes_cap=_int(env, "MIRROR_P2P_UDP_BYTES_CAP", 512 * 1024 * 1024),
+            p2p_edge_token_ttl=_int(env, "MIRROR_P2P_EDGE_TOKEN_TTL", 180),
             plugin_dir=Path(env.get("MIRROR_PLUGIN_DIR") or root / "plugins"),
+            update_repo=(env.get("MIRROR_UPDATE_REPO") or "crazying-dev/CrMcDownload").strip(),
+            update_latest=(env.get("MIRROR_UPDATE_LATEST_VERSION") or "0.7.0").strip(),
+            update_min=(env.get("MIRROR_UPDATE_MIN_VERSION") or "").strip(),
+            update_enforce=(env.get("MIRROR_UPDATE_ENFORCE", "on").strip().lower()
+                            not in ("0", "false", "no", "off")),
+            update_release_url=(env.get("MIRROR_UPDATE_RELEASE_URL") or "").strip(),
+            update_asset=(env.get("MIRROR_UPDATE_ASSET") or "").strip(),
         )
 
     def prepare(self) -> None:

@@ -1,0 +1,15 @@
+{
+  "id": "offline-multiplayer",
+  "version": "1.2.0",
+  "abi": "cp312-win_amd64",
+  "sha256": "3a01d4e56eed4fc7a2f6e696d4050008c84ae2b4c05fec1ed9c0428ef124ecbc",
+  "size": 26875,
+  "zip": "/plugin/offline-multiplayer.zip",
+  "capabilities": [
+    "net.tunnel",
+    "ui.log",
+    "config.namespace",
+    "ui.notice",
+    "runtime.task"
+  ]
+}

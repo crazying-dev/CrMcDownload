@@ -16,7 +16,7 @@ from server_mirror.servers import ServerProbe
 from server_mirror.static import StaticHandler
 
 if TYPE_CHECKING:  # pragma: no cover - 仅类型提示
-    from server_mirror.p2p import RelayServer, SignalingRouter
+    from server_mirror.p2p import RelayServer, SignalingRouter, UdpEdgeServer
 
 __all__ = ["main"]
 
@@ -33,15 +33,20 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _build_p2p(
     settings: Settings, db: Database
-) -> tuple["SignalingRouter | None", "RelayServer | None"]:
-    """启用离线联机时构造信令 + 中继；否则 ``(None, None)``。信令需 ``db`` 做房间持久登记。"""
+) -> tuple["SignalingRouter | None", "RelayServer | None", "UdpEdgeServer | None"]:
+    """启用离线联机时构造信令 + TCP 中继 + UDP 边缘；否则全为 ``None``。
+
+    信令需 ``db`` 做房间持久登记；UDP 边缘仅在 ``p2p_vpn_enable`` 打开时启动，
+    关闭后客户端自动回落旧隧道模式。
+    """
     if not getattr(settings, "p2p_enable", False):
-        return None, None
-    from server_mirror.p2p import RelayServer, SignalingRouter
+        return None, None, None
+    from server_mirror.p2p import RelayServer, SignalingRouter, UdpEdgeServer
 
     relay = RelayServer(settings)
-    p2p_router = SignalingRouter(settings=settings, relay=relay, db=db)
-    return p2p_router, relay
+    edge = UdpEdgeServer(settings) if getattr(settings, "p2p_vpn_enable", True) else None
+    p2p_router = SignalingRouter(settings=settings, relay=relay, db=db, edge=edge)
+    return p2p_router, relay, edge
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -81,7 +86,7 @@ def main(argv: list[str] | None = None) -> int:
         cache_stats=None,
         probe_status=probe.status if probe else None,
     )
-    p2p_router, relay = _build_p2p(settings, db)
+    p2p_router, relay, edge = _build_p2p(settings, db)
     router.p2p = p2p_router
     server = MirrorHTTPServer(
         (settings.host, settings.port), settings, router=router, db=db, probe=probe, relay=relay
@@ -93,11 +98,14 @@ def main(argv: list[str] | None = None) -> int:
         probe.start()
     if relay is not None:
         relay.start()
+    if edge is not None:
+        edge.start()
     print(
         f"mirror listening on http://{settings.host}:{settings.port} "
         f"cache={settings.cache_dir} token={'on' if settings.token else 'off'} "
         f"db={settings.db_path} probe={'on' if probe else 'off'} "
-        f"p2p={'on' if p2p_router else 'off'}",
+        f"p2p={'on' if p2p_router else 'off'}"
+        + (f" p2p-udp={settings.host}:{edge.port}" if edge is not None else ""),
         flush=True,
     )
     try:
@@ -106,6 +114,8 @@ def main(argv: list[str] | None = None) -> int:
         pass
     finally:
         server.server_close()
+        if edge is not None:
+            edge.stop()
     return 0
 
 

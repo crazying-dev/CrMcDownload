@@ -5,10 +5,11 @@ __pycache__/
 .uv-cache/
 uv.lock.tmp
 build/
-dist/
+/dist/
 logs/
 data/
 .testbed/
+pytest-of-*/
 *.part
 *.log
 .idea/

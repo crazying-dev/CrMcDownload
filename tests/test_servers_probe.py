@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 
 import pytest
 
@@ -30,9 +31,44 @@ def test_encode_varint_boundaries():
     assert encode_varint(-1) == b"\xff\xff\xff\xff\x0f"      # 补码 5 字节
 
 
-def test_build_request_starts_with_length_prefix():
+def test_build_request_ends_with_status_request():
     payload = servers.build_request("mc.example", 25565)
     assert isinstance(payload, bytes) and len(payload) > 0
+    # Handshake 之后只能是空的状态请求包，不能是 Login Start
+    assert payload.endswith(b"\x01\x00")
+    assert b"OffCraft-Mirror" not in payload
+
+
+def test_decode_varint():
+    assert servers._decode_varint(b"\x00") == (0, 1)
+    assert servers._decode_varint(b"\x80\x01") == (128, 2)
+    with pytest.raises(ValueError):
+        servers._decode_varint(b"\x80")
+
+
+def test_probe_once_parses_real_status_frame():
+    async def scenario():
+        async def handle(reader, writer):
+            await reader.read(128)          # 请求内容不重要，这里只验证响应解析
+            body = json.dumps({
+                "version": {"name": "1.20.4", "protocol": 763},
+                "players": {"online": 1, "max": 2},
+                "description": "hi",
+            }).encode()
+            inner = b"\x00" + servers.encode_varint(len(body)) + body
+            writer.write(servers.encode_varint(len(inner)) + inner)
+            await writer.drain()
+            writer.close()
+
+        server = await asyncio.start_server(handle, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        async with server:
+            return await probe_once("127.0.0.1", port, timeout=2.0, allow_private=True)
+
+    result = asyncio.run(scenario())
+    assert result["ok"] is True, result["error"]
+    assert result["version"] == "1.20.4"
+    assert result["online"] == 1 and result["max"] == 2
 
 
 # ------------------------------------------------------------- 解析响应

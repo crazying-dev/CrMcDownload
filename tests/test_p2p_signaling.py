@@ -8,12 +8,13 @@ from __future__ import annotations
 
 import hmac
 import secrets
+import time
 from dataclasses import dataclass
 from hashlib import sha256
 
 import pytest
 
-from server_mirror.p2p import SignalingRouter, proof_message
+from server_mirror.p2p import SignalingRouter, derive_peer_vip, proof_message
 
 CLIENT = ("1.2.3.4", 5678)
 DEVICE = secrets.token_hex(16)   # 稳定的合法 device_id（32 位 hex）
@@ -364,3 +365,166 @@ def test_rekey_requires_host_and_valid_key(router):
         "auth_key": secrets.token_bytes(32).hex(),
     }, CLIENT)
     assert status == 404
+
+
+# ---------------------------------------------------------------- 虚拟局域网（M1）
+
+class _FakeTransport:
+    def __init__(self) -> None:
+        self.sent: list[tuple[bytes, tuple]] = []
+
+    def sendto(self, data: bytes, addr: tuple) -> None:
+        self.sent.append((bytes(data), tuple(addr)))
+
+    def close(self) -> None:
+        pass
+
+
+@pytest.fixture()
+def vpn_router(tmp_path):
+    """启用 VPN 的测试路由器：VIP 分配 + UDP 边缘（假 transport，不占端口）。"""
+    from server_mirror.db import Database
+    from server_mirror.p2p import RelayServer, UdpEdgeServer
+
+    settings = _Settings()
+    settings.p2p_vpn_enable = True
+    settings.p2p_udp_port = 25578
+    settings.p2p_udp_bytes_cap = 512 * 1024 * 1024
+    settings.p2p_edge_token_ttl = 180
+    relay = RelayServer(settings, port=0)
+    edge = UdpEdgeServer(settings, port=0)
+    edge._transport = _FakeTransport()
+    db = Database(tmp_path / "test.db")
+    yield SignalingRouter(settings=settings, relay=relay, db=db, edge=edge)
+    edge._transport = None
+    db.close()
+
+
+def test_open_assigns_host_vip_and_edge_token(vpn_router):
+    _, host = _open_host(vpn_router, "ROOM1", secrets.token_bytes(32),
+                         pub=secrets.token_hex(32))
+    assert host["vip"] == "10.66.0.1"
+    assert host["host_vip"] == "10.66.0.1"
+    assert host["edge"] == {"host": "127.0.0.1", "port": 25578}
+    assert host["edge_token"]
+    assert host["peers"][0]["vip"] == "10.66.0.1"
+    # 令牌绑定 room + sid + device，可被 UDP 边缘领取
+    grant = vpn_router.edge.tokens.claim(host["edge_token"], "5.5.5.5:9000")
+    assert grant is not None
+    assert grant.room == "room1" and grant.sid == host["sid"] and grant.device == DEVICE
+
+
+def test_join_assigns_derived_vip(vpn_router):
+    auth_key = secrets.token_bytes(32)
+    _open_host(vpn_router, "ROOM1", auth_key, pub=secrets.token_hex(32))
+    device = secrets.token_hex(16)
+    status, join = _join_with_device(vpn_router, "ROOM1", auth_key, device)
+    assert status == 200
+    assert join["vip"] == derive_peer_vip(auth_key, device)
+    assert join["host_vip"] == "10.66.0.1"
+    assert join["edge_token"]
+    # 加入者不能拿到别人的 uid/vip 之外的敏感字段
+    assert all("edge_token" not in p for p in join["peers"])
+
+
+def test_vip_stable_across_rejoin_same_device(vpn_router):
+    auth_key = secrets.token_bytes(32)
+    _open_host(vpn_router, "ROOM1", auth_key, pub=secrets.token_hex(32))
+    device = secrets.token_hex(16)
+    _, first = _join_with_device(vpn_router, "ROOM1", auth_key, device)
+    vpn_router.handle("/p2p/leave", {"room": "ROOM1", "sid": first["sid"]}, CLIENT)
+    _, second = _join_with_device(vpn_router, "ROOM1", auth_key, device)
+    assert second["vip"] == first["vip"]
+
+
+def test_vip_collision_uses_linear_probe(vpn_router):
+    auth_key = secrets.token_bytes(32)
+    _open_host(vpn_router, "ROOM1", auth_key, pub=secrets.token_hex(32))
+    pair = _colliding_devices(auth_key)
+    assert pair is not None
+    _, first = _join_with_device(vpn_router, "ROOM1", auth_key, pair[0])
+    _, second = _join_with_device(vpn_router, "ROOM1", auth_key, pair[1])
+    assert first["vip"] == derive_peer_vip(auth_key, pair[0])
+    assert second["vip"] != first["vip"]
+    assert second["vip"].startswith("10.66.0.")
+    assert 2 <= int(second["vip"].rsplit(".", 1)[1]) <= 254
+
+
+def _colliding_devices(auth_key: bytes) -> tuple[str, str] | None:
+    seen: dict[str, str] = {}
+    for index in range(400):
+        device = sha256(f"dev{index}".encode()).hexdigest()[:32]
+        vip = derive_peer_vip(auth_key, device)
+        if vip in seen:
+            return seen[vip], device
+        seen[vip] = device
+    return None
+
+
+def test_roster_exposes_peer_udp_after_hello(vpn_router):
+    auth_key = secrets.token_bytes(32)
+    _, host = _open_host(vpn_router, "ROOM1", auth_key, pub=secrets.token_hex(32))
+    _, join = _join_with_device(vpn_router, "ROOM1", auth_key, secrets.token_hex(16))
+    vpn_router.edge._on_datagram(
+        b"HELLO " + join["edge_token"].encode("ascii"), ("9.9.9.9", 4242)
+    )
+    status, roster = vpn_router.handle(
+        "/p2p/roster", {"room": "ROOM1", "sid": host["host"]}, CLIENT
+    )
+    assert status == 200
+    peer = next(p for p in roster["peers"] if p["pid"] == join["sid"])
+    assert peer["udp"] == "9.9.9.9:4242"
+    assert peer["vip"] == join["vip"]
+    # 房主自己尚未 HELLO → 端点为空的占位
+    host_peer = next(p for p in roster["peers"] if p["pid"] == host["host"])
+    assert host_peer["udp"] == ""
+
+
+def test_roster_returns_caller_edge_token_and_reissues_after_expiry(vpn_router):
+    auth_key = secrets.token_bytes(32)
+    _, host = _open_host(vpn_router, "ROOM1", auth_key, pub=secrets.token_hex(32))
+    _, join = _join_with_device(vpn_router, "ROOM1", auth_key, secrets.token_hex(16))
+    status, roster = vpn_router.handle(
+        "/p2p/roster", {"room": "ROOM1", "sid": join["sid"]}, CLIENT
+    )
+    assert status == 200
+    assert roster["vip"] == join["vip"]
+    assert roster["edge"] == {"host": "127.0.0.1", "port": 25578}
+    # 有效期内复用同一枚令牌：轮询不会让 vpnd 频繁重发 HELLO
+    assert roster["edge_token"] == join["edge_token"]
+    # 令牌只发给持有者本人，绝不进名册
+    assert all("edge_token" not in p for p in roster["peers"])
+
+    # 令牌过期后名册轮询重新签发（长会话中 vpnd 每 60s 一次的 HELLO 才不会失效）
+    with vpn_router.edge.tokens._lock:
+        for token in list(vpn_router.edge.tokens._grants):
+            vpn_router.edge.tokens._grants[token].expires = 0
+        vpn_router.edge.tokens._prune(time.time())
+    status, refreshed = vpn_router.handle(
+        "/p2p/roster", {"room": "ROOM1", "sid": join["sid"]}, CLIENT
+    )
+    assert status == 200
+    assert refreshed["edge_token"] != join["edge_token"]
+    assert vpn_router.edge.tokens.claim(refreshed["edge_token"], "7.7.7.7:1000") is not None
+
+
+def test_announce_returns_vip_roster_and_edge(vpn_router):
+    auth_key = secrets.token_bytes(32)
+    _, host = _open_host(vpn_router, "ROOM1", auth_key, pub=secrets.token_hex(32))
+    _, join = _join_with_device(vpn_router, "ROOM1", auth_key, secrets.token_hex(16))
+    status, ann = vpn_router.handle(
+        "/p2p/announce", {"room": "ROOM1", "sid": host["host"]}, CLIENT
+    )
+    assert status == 200
+    assert ann["vip"] == "10.66.0.1"
+    assert ann["edge"] == {"host": "127.0.0.1", "port": 25578}
+    assert ann["edge_token"]
+    assert {p["pid"] for p in ann["peers"]} == {host["host"], join["sid"]}
+
+
+def test_vpn_disabled_omits_vip_and_edge(vpn_router):
+    vpn_router.settings.p2p_vpn_enable = False
+    _, host = _open_host(vpn_router, "ROOM1", secrets.token_bytes(32),
+                         pub=secrets.token_hex(32))
+    assert "vip" not in host and "edge_token" not in host and "edge" not in host
+    assert all(p["vip"] == "" and p["udp"] == "" for p in host["peers"])

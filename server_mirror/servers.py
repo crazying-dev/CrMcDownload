@@ -48,11 +48,27 @@ def _varint_string(text: str) -> bytes:
 
 
 def build_request(host: str, port: int, name: str = "OffCraft-Mirror") -> bytes:
+    """Handshake(nextState=1) + Status Request。
+
+    状态阶段只能发 ``packetId=0x00`` 的空包；``name`` 仅为兼容旧调用保留，
+    发 Login Start 会被 Velocity / BungeeCord 等严格服务端直接断开。
+    """
     body = encode_varint(0) + encode_varint(-1) + _varint_string(host) + int(port).to_bytes(2, "big") + encode_varint(1)
     handshake = encode_varint(len(body)) + body
-    login_body = encode_varint(0) + _varint_string(name)
-    login = encode_varint(len(login_body)) + login_body
-    return handshake + login
+    return handshake + b"\x01\x00"
+
+
+def _decode_varint(data: bytes) -> tuple[int, int]:
+    """从 bytes 头部解一个 VarInt，返回 ``(值, 消耗字节数)``。"""
+    value = 0
+    for index in range(5):
+        if index >= len(data):
+            raise ValueError("VarInt 数据不完整")
+        chunk = data[index]
+        value |= (chunk & 0x7F) << (7 * index)
+        if not chunk & 0x80:
+            return value, index + 1
+    raise ValueError("VarInt 超过 5 字节")
 
 
 async def _read_varint(reader: asyncio.StreamReader) -> int:
@@ -157,7 +173,18 @@ async def probe_once(
         if length > _MAX_JSON_BYTES:
             result["error"] = "服务器响应过大"
             return result
-        payload = await asyncio.wait_for(reader.readexactly(length), timeout)
+        frame = await asyncio.wait_for(reader.readexactly(length), timeout)
+        # 帧格式：packetId(0x00) + 字符串长度 VarInt + JSON
+        packet_id, offset = _decode_varint(frame)
+        if packet_id != 0x00:
+            result["error"] = f"响应包 id 异常（0x{packet_id:02x}）"
+            return result
+        size, step = _decode_varint(frame[offset:])
+        offset += step
+        if size <= 0 or len(frame) < offset + size:
+            result["error"] = "响应 JSON 长度不完整"
+            return result
+        payload = frame[offset : offset + size]
         latency_ms = (time.perf_counter() - started) * 1000.0
         data = json.loads(payload.decode("utf-8", "replace"))
         if not isinstance(data, dict) or "version" not in data:

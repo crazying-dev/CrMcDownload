@@ -11,9 +11,12 @@
 - ``RelayServer``：跑在独立线程的 asyncio 事件循环里的 TCP 中继，按令牌把两条
   入站连接成对拼桥。它只转发不透明密文帧、绝不解密；单会话累计字节 / 存活时长
   封顶后立刻断开，防止镜像沦为无限流量的开放中继。停止时干净关循环与套接字。
+- ``UdpEdgeServer``：UDP 数据面的「边缘服务」——登记每台设备的公网 UDP 端点
+  （``HELLO <token>``），使房主与加入者能从名册拿到对端地址做打洞；打洞失败时按
+  ``R <dst_sid>`` 前缀转发密文。它同样只转发不透明明文（实际是 AEAD 密文）。
 
-信令只走主 HTTP 端口的 ``/p2p/*``（控制面），中继监听独立 TCP 端口（数据面），
-不经 nginx。凭证（auth_key / proof）与全局下载令牌相互独立。
+信令只走主 HTTP 端口的 ``/p2p/*``（控制面），中继监听独立 TCP 端口 / UDP 边缘端口
+（数据面），不经 nginx。凭证（auth_key / proof / edge_token）与全局下载令牌相互独立。
 """
 
 from __future__ import annotations
@@ -27,7 +30,16 @@ from dataclasses import dataclass, field
 from hashlib import sha256
 from typing import Any
 
-__all__ = ["SignalingRouter", "RelayServer", "PROOF_MESSAGE_PREFIX"]
+__all__ = [
+    "SignalingRouter",
+    "RelayServer",
+    "UdpEdgeServer",
+    "EdgeTokenStore",
+    "PROOF_MESSAGE_PREFIX",
+    "VIP_PREFIX",
+    "VIP_HOST",
+    "derive_peer_vip",
+]
 
 # ------------------------------------------------------------------ 密码学原语
 #: proof 覆盖的域分隔前缀，杜绝跨用途重放
@@ -37,6 +49,23 @@ _PUB_BYTES = 32
 _PROOF_BYTES = 32          # HMAC-SHA256 摘要长度
 _NONCE_MAX = 64
 _MAX_TOKEN_BYTES = 64 * 1024
+
+#: 虚拟局域网网段：房主固定 ``10.66.0.1``，加入者派生 ``10.66.0.2`` - ``10.66.0.254``
+VIP_PREFIX = "10.66.0"
+VIP_HOST = f"{VIP_PREFIX}.1"
+VIP_FIRST = 2
+VIP_LAST = 254
+
+
+def derive_peer_vip(auth_key: bytes, device: str) -> str:
+    """按房间准入密钥 + 设备标识派生稳定虚拟 IP。
+
+    ``HMAC-SHA256(auth_key, DOMAIN||device)`` 取前两字节映射进 ``.2`` - ``.254``；
+    同一设备在同一房间（同一 auth_key）重连拿回同一 IP。服务端另有线性探测兜底冲突。
+    """
+    digest = hmac.new(auth_key, b"offcraft-vip-v1|" + str(device).encode("utf-8"), sha256).digest()
+    span = VIP_LAST - VIP_FIRST + 1
+    return f"{VIP_PREFIX}.{VIP_FIRST + int.from_bytes(digest[:2], 'big') % span}"
 
 
 def _unhex(value: Any, want: int | None = None) -> bytes | None:
@@ -79,10 +108,20 @@ class Peer:
     world: str = ""
     port: int = 0
     device: str = ""    # 稳定设备标识：踢出后据此阻止同设备换 sid 重入
+    vip: str = ""       # 虚拟 IP（10.66.0.x）；vpn 关闭时为空
+    udp: str = ""       # UDP 边缘登记的观测端点 "ip:port"；未登记为空
+    edge_token: str = ""  # 本端边缘令牌（仅随本端响应下发，不进名册）
     last_seen: float = field(default_factory=time.time)
 
     def as_roster(self) -> dict[str, Any]:
-        return {"pid": self.sid, "addr": self.addr, "world": self.world, "port": self.port}
+        return {
+            "pid": self.sid,
+            "addr": self.addr,
+            "world": self.world,
+            "port": self.port,
+            "vip": self.vip,
+            "udp": self.udp,
+        }
 
 
 @dataclass
@@ -104,6 +143,8 @@ class Room:
     blocked: set[str] = field(default_factory=set)
     #: 被踢出的设备：同一设备换新 sid 也不能重新加入（改密码/重开房间时清空）
     blocked_devices: set[str] = field(default_factory=set)
+    #: 设备 -> 虚拟 IP 的保留映射：成员离开后不回收，保证同一设备重连拿回同一 IP
+    vip_by_device: dict[str, str] = field(default_factory=dict)
 
 
 def _client_addr(client: Any) -> str:
@@ -136,6 +177,7 @@ class SignalingRouter:
     settings: Any
     relay: "RelayServer | None" = None
     db: Any = None          # server_mirror.db.Database（房间持久登记）；None 时 create/open 不可用
+    edge: "UdpEdgeServer | None" = None   # UDP 边缘服务；None 时不下发 edge_token/udp
     _rooms: dict[str, Room] = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
@@ -157,10 +199,71 @@ class SignalingRouter:
     def _max_per_device(self) -> int:
         return max(0, getattr(self.settings, "p2p_max_rooms_per_device", self._MAX_PER_DEVICE_DEFAULT))
 
+    @property
+    def _vpn(self) -> bool:
+        """虚拟局域网（VIP + UDP 边缘）是否启用；关闭后响应不含 vip/edge_token。"""
+        return bool(getattr(self.settings, "p2p_vpn_enable", True))
+
     def relay_info(self) -> dict[str, Any]:
         host = (getattr(self.settings, "p2p_relay_host", "") or "").strip()
         host = host or getattr(self.settings, "host", "127.0.0.1")
         return {"host": host, "port": int(getattr(self.settings, "p2p_relay_port", 0) or 0)}
+
+    def edge_info(self) -> dict[str, Any]:
+        """UDP 边缘端口对外通告地址（与中继共用对外主机名）。"""
+        host = (getattr(self.settings, "p2p_relay_host", "") or "").strip()
+        host = host or getattr(self.settings, "host", "127.0.0.1")
+        return {"host": host, "port": int(getattr(self.settings, "p2p_udp_port", 0) or 0)}
+
+    def _allocate_vip(self, room: Room, device: str, *, host: bool) -> str:
+        """分配虚拟 IP（调用方持锁）：房主固定 ``.1``；加入者按设备派生，冲突线性探测。
+
+        ``vip_by_device`` 保留历史分配，成员离开后不回收，保证同一设备重连拿回同一 IP。
+        """
+        if not self._vpn:
+            return ""
+        if host:
+            if device:
+                room.vip_by_device[device] = VIP_HOST
+            return VIP_HOST
+        if device and device in room.vip_by_device:
+            return room.vip_by_device[device]
+        used = set(room.vip_by_device.values())
+        used.update(p.vip for p in room.peers.values() if p.vip)
+        span = VIP_LAST - VIP_FIRST + 1
+        start = VIP_FIRST
+        if device:
+            start = int(derive_peer_vip(room.auth_key, device).rsplit(".", 1)[1])
+        for step in range(span):
+            number = VIP_FIRST + ((start - VIP_FIRST + step) % span)
+            ip = f"{VIP_PREFIX}.{number}"
+            if ip not in used:
+                if device:
+                    room.vip_by_device[device] = ip
+                return ip
+        return ""   # 253 个地址耗尽（房间人数封顶 16，正常不会发生）
+
+    def _issue_edge(self, room: Room, sid: str) -> str:
+        """签发/复用本端边缘令牌（调用方持锁）：绑定 room+sid+device+vip，TTL 到期后重发。"""
+        if not self._vpn or self.edge is None:
+            return ""
+        peer = room.peers.get(sid)
+        if peer is None:
+            return ""
+        token = peer.edge_token
+        if token and self.edge.token_valid(token):
+            return token
+        token = self.edge.issue_token(
+            room=room.code, sid=sid, device=peer.device, vip=peer.vip,
+        )
+        peer.edge_token = token
+        return token
+
+    def _roster_payload(self, room: Room) -> list[dict[str, Any]]:
+        """名册条目（调用方持锁）：顺带用 UDP 边缘的实时登记刷新每人的 ``udp`` 端点。"""
+        for peer in room.peers.values():
+            peer.udp = self.edge.endpoint(room.code, peer.sid) if self.edge is not None else ""
+        return [p.as_roster() for p in room.peers.values()]
 
     def _prune(self, now: float) -> None:
         """回收空闲超时的房间（调用方持锁）。"""
@@ -243,6 +346,8 @@ class SignalingRouter:
         self.db.delete_room(key, device)
         with self._lock:
             self._rooms.pop(key, None)  # 若正开放，一并撤下实时会话
+        if self.edge is not None:
+            self.edge.evict_room(key)
         return 200, {"ok": True}
 
     # -------------------------------------------------------------- /p2p/open
@@ -281,19 +386,30 @@ class SignalingRouter:
                 host_secret=secrets.token_hex(32),
                 last_seen=now,
             )
+            host_vip = self._allocate_vip(room, device, host=True)
             room.peers[sid] = Peer(sid=sid, pub=_norm_pub(pub_hex), addr=addr,
                                    world=room.world, port=room.port, device=device,
-                                   last_seen=now)
+                                   vip=host_vip, last_seen=now)
             self._rooms[key] = room
+            edge_token = self._issue_edge(room, sid)
+            roster = self._roster_payload(room)
         if self.db is not None:
             self.db.touch_open(key)
-        return 200, {
+        response = {
             "sid": sid,
             "host": room.host_sid,
             "host_secret": room.host_secret,   # 仅回给房主，用于 kick 鉴权；不进名册
-            "peers": [p.as_roster() for p in room.peers.values()],
+            "peers": roster,
             "relay": self.relay_info(),
         }
+        if self._vpn:
+            response["vip"] = host_vip
+            response["host_vip"] = host_vip
+            if self.edge is not None:
+                response["edge"] = self.edge_info()
+                if edge_token:
+                    response["edge_token"] = edge_token
+        return 200, response
 
     # -------------------------------------------------------------- /p2p/join
     def _join(self, name: str, payload: dict[str, Any], client: Any) -> tuple[int, dict]:
@@ -318,15 +434,28 @@ class SignalingRouter:
             if len(room.peers) >= self._MAX_PEERS:
                 return 503, {"error": "房间人数已满"}
             sid = secrets.token_hex(16)
+            vip = self._allocate_vip(room, device, host=False)
             room.peers[sid] = Peer(sid=sid, pub=_norm_pub(pub_hex), addr=addr,
-                                   device=device, last_seen=now)
+                                   device=device, vip=vip, last_seen=now)
             room.last_seen = now
-            return 200, {
-                "sid": sid,
-                "host": room.host_sid,
-                "peers": [p.as_roster() for p in room.peers.values()],
-                "relay": self.relay_info(),
-            }
+            host_peer = room.peers.get(room.host_sid)
+            host_vip = host_peer.vip if host_peer is not None else ""
+            edge_token = self._issue_edge(room, sid)
+            roster = self._roster_payload(room)
+        response = {
+            "sid": sid,
+            "host": room.host_sid,
+            "peers": roster,
+            "relay": self.relay_info(),
+        }
+        if self._vpn:
+            response["vip"] = vip
+            response["host_vip"] = host_vip
+            if self.edge is not None:
+                response["edge"] = self.edge_info()
+                if edge_token:
+                    response["edge_token"] = edge_token
+        return 200, response
 
     # ---------------------------------------------------------- /p2p/announce
     def _announce(self, code: str, payload: dict[str, Any], client: Any) -> tuple[int, dict]:
@@ -352,7 +481,19 @@ class SignalingRouter:
                 peer.world, peer.port = room.world, room.port
             room.last_seen = now
             pending = room.pending.pop(sid, "")
-            return 200, {"ok": True, "relay_token": pending}
+            edge_token = self._issue_edge(room, sid)
+            response = {
+                "ok": True,
+                "relay_token": pending,
+                "peers": self._roster_payload(room),
+            }
+            if self._vpn:
+                response["vip"] = peer.vip
+                if edge_token:
+                    response["edge_token"] = edge_token
+                if self.edge is not None:
+                    response["edge"] = self.edge_info()
+        return 200, response
 
     # ------------------------------------------------------------- /p2p/relay
     def _relay(self, code: str, payload: dict[str, Any], client: Any) -> tuple[int, dict]:
@@ -383,23 +524,31 @@ class SignalingRouter:
         code = code.strip().lower()
         sid = _clamp_sid(payload.get("sid"))
         now = time.time()
+        host_left = False
         with self._lock:
             self._prune(now)
             room = self._rooms.get(code)
             if room is not None and sid:
+                # 虚拟 IP 保留在 room.vip_by_device：同一设备重连拿回同一 IP
                 room.peers.pop(sid, None)
                 for t in [t for t, tgt in _room_pending(room) if tgt == sid]:
                     room.pending.pop(t, None)
                 if not room.peers or room.host_sid == sid:
                     self._rooms.pop(code, None)
-            return 200, {"ok": True}
+                    host_left = True
+        if self.edge is not None:
+            if host_left:
+                self.edge.evict_room(code)
+            elif sid:
+                self.edge.evict(code, sid)
+        return 200, {"ok": True}
 
     # ------------------------------------------------------------- /p2p/roster
     def _roster(self, name: str, payload: dict[str, Any], client: Any) -> tuple[int, dict]:
         """当前会话在线名册：任何在房成员（sid∈peers）都可查（只读）。
 
-        名册只含 pid/addr/world/port——不暴露中继地址以外的服务端域名；addr 为对端观测地址，
-        供房主展示“成员 N”而非真实 IP（前端不直接展示 addr）。
+        名册条目含 pid/addr/world/port/vip/udp——不暴露中继地址以外的服务端域名；addr 为
+        对端观测地址（供打洞），vip 为虚拟 IP，udp 为对端在 UDP 边缘登记的公网端点（未登记为空）。
         """
         key = name.strip().lower()
         sid = _clamp_sid(payload.get("sid"))
@@ -412,7 +561,18 @@ class SignalingRouter:
             if not sid or sid not in room.peers:
                 return 403, {"error": "不属于该房间"}
             room.last_seen = now
-            return 200, {"peers": [p.as_roster() for p in room.peers.values()]}
+            response: dict[str, Any] = {"peers": self._roster_payload(room)}
+            if self._vpn:
+                # 名册轮询同时刷新本端边缘令牌：令牌 TTL 短于会话时长，vpnd 每 60s
+                # 发一次 HELLO，必须能在令牌过期后拿到新令牌（只发给令牌持有者本人）。
+                peer = room.peers[sid]
+                response["vip"] = peer.vip
+                edge_token = self._issue_edge(room, sid)
+                if edge_token:
+                    response["edge_token"] = edge_token
+                if self.edge is not None:
+                    response["edge"] = self.edge_info()
+            return 200, response
 
     # --------------------------------------------------------------- /p2p/kick
     def _kick(self, name: str, payload: dict[str, Any], client: Any) -> tuple[int, dict]:
@@ -445,9 +605,11 @@ class SignalingRouter:
             if kicked is not None and kicked.device:
                 room.blocked_devices.add(kicked.device)
             room.last_seen = now
-            peers = [p.as_roster() for p in room.peers.values()]
+            peers = self._roster_payload(room)
         if self.relay is not None:
             self.relay.evict(key, target)
+        if self.edge is not None:
+            self.edge.evict(key, target)
         return 200, {"ok": True, "kicked": target, "peers": peers}
 
     # --------------------------------------------------------------- /p2p/rekey
@@ -482,11 +644,16 @@ class SignalingRouter:
             room.pending.clear()
             room.blocked.clear()
             room.blocked_devices.clear()
+            # 新 auth_key 会改变加入者的派生 VIP：清空历史保留，仅留房主固定 .1
+            room.vip_by_device = {room.owner: VIP_HOST} if room.owner else {}
             room.last_seen = now
-            peers = [p.as_roster() for p in room.peers.values()]
+            peers = self._roster_payload(room)
         if self.relay is not None:
             for peer_sid in removed:
                 self.relay.evict(key, peer_sid)
+        if self.edge is not None:
+            for peer_sid in removed:
+                self.edge.evict(key, peer_sid)
         return 200, {"ok": True, "peers": peers, "removed": len(removed)}
 
 
@@ -788,3 +955,324 @@ def _parse_hello(hello: bytes) -> str:
         return body.decode("ascii")
     except UnicodeDecodeError:
         return ""
+
+
+# ---------------------------------------------------------------- UDP 边缘服务
+@dataclass
+class EdgeGrant:
+    """边缘令牌台账条目：绑定房间 + 会话 sid + 设备 + 虚拟 IP。"""
+    token: str
+    room: str
+    sid: str
+    device: str
+    vip: str
+    expires: float
+
+
+class EdgeTokenStore:
+    """边缘令牌台账（线程安全）：签发、TTL 校验、一枚令牌只绑定一个 UDP 端点。
+
+    UDP 边缘服务跑在自己的事件循环线程，信令跑在 HTTP 工作线程，因此这里用
+    ``threading.Lock`` 而不是 asyncio 原语。
+    """
+
+    def __init__(self, ttl: float = 180.0) -> None:
+        self.ttl = float(max(30, int(ttl or 180)))
+        self._lock = threading.Lock()
+        self._grants: dict[str, EdgeGrant] = {}
+        #: token -> "ip:port"：绑定后不可换端点（换端点需信令下发的新令牌）
+        self._bindings: dict[str, str] = {}
+
+    def _prune(self, now: float) -> None:
+        for token in [t for t, g in self._grants.items() if g.expires < now]:
+            self._grants.pop(token, None)
+            self._bindings.pop(token, None)
+
+    def issue(self, *, room: str, sid: str, device: str, vip: str) -> str:
+        token = secrets.token_urlsafe(24)
+        now = time.time()
+        with self._lock:
+            self._prune(now)
+            self._grants[token] = EdgeGrant(
+                token=token, room=room, sid=sid, device=device, vip=vip,
+                expires=now + self.ttl,
+            )
+        return token
+
+    def valid(self, token: str) -> bool:
+        now = time.time()
+        with self._lock:
+            self._prune(now)
+            return token in self._grants
+
+    def claim(self, token: str, endpoint: str) -> EdgeGrant | None:
+        """校验并绑定端点；令牌不存在/过期或已绑定到别的端点时返回 None。"""
+        now = time.time()
+        with self._lock:
+            self._prune(now)
+            grant = self._grants.get(token)
+            if grant is None:
+                return None
+            bound = self._bindings.get(token)
+            if bound is not None and bound != endpoint:
+                return None
+            self._bindings[token] = endpoint
+            return grant
+
+
+@dataclass
+class _Endpoint:
+    room: str
+    sid: str
+    vip: str
+    addr: tuple[str, int]
+    last_seen: float
+
+
+class _EdgeProtocol(asyncio.DatagramProtocol):
+    def __init__(self, owner: "UdpEdgeServer") -> None:
+        self._owner = owner
+
+    def datagram_received(self, data: bytes, addr: Any) -> None:
+        self._owner._on_datagram(data, addr)
+
+
+class UdpEdgeServer:
+    """UDP 边缘服务：登记公网端点 + 按目的 sid 转发密文。
+
+    协议（单包，明文部分只有控制头）：
+
+    - ``HELLO <token>`` → ``OK <sid> <vip>``：登记该会话的观测 ``ip:port``；
+      同一令牌只允许绑定一个端点。
+    - ``R <dst_sid>`` + 载荷：把载荷原样转发给同房间目标端点（服务端只见密文）。
+    - 其他报文一律丢弃，绝不开放任意转发。
+
+    只服务已登记端点；单房间累计转发字节超过 ``p2p_udp_bytes_cap``、或端点空闲超过
+    ``p2p_room_ttl`` 即停止转发，避免沦为开放 UDP 中继。
+    """
+
+    _IDLE_DEFAULT = 180.0
+    _SWEEP_INTERVAL = 30.0
+
+    def __init__(
+        self,
+        settings: Any,
+        *,
+        host: str = "0.0.0.0",
+        port: int | None = None,
+        bytes_cap: int | None = None,
+        token_ttl: float | None = None,
+        idle: float | None = None,
+    ) -> None:
+        self.host = host
+        self.port = int(port if port is not None else getattr(settings, "p2p_udp_port", 0) or 0)
+        self.bytes_cap = int(
+            bytes_cap if bytes_cap is not None
+            else getattr(settings, "p2p_udp_bytes_cap", 0) or 0
+        )
+        self.idle = float(
+            idle if idle is not None
+            else getattr(settings, "p2p_room_ttl", self._IDLE_DEFAULT) or self._IDLE_DEFAULT
+        )
+        ttl = token_ttl if token_ttl is not None else max(
+            60, getattr(settings, "p2p_edge_token_ttl", 180)
+        )
+        self.tokens = EdgeTokenStore(ttl)
+        self._lock = threading.Lock()
+        self._endpoints: dict[tuple[str, str], _Endpoint] = {}
+        self._addr_map: dict[tuple[str, int], tuple[str, str]] = {}
+        self._room_bytes: dict[str, int] = {}
+        self._last_sweep = 0.0
+        self._thread: threading.Thread | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._transport: Any = None
+        self._stopped: asyncio.Event | None = None
+        self._stop = threading.Event()
+        self.forwarded = 0
+        self.dropped = 0
+
+    # -------------------------------------------------------------- 令牌/端点查询
+    def issue_token(self, *, room: str, sid: str, device: str, vip: str) -> str:
+        return self.tokens.issue(room=room, sid=sid, device=device, vip=vip)
+
+    def token_valid(self, token: str) -> bool:
+        return self.tokens.valid(token) if token else False
+
+    def endpoint(self, room: str, sid: str) -> str:
+        """返回该会话登记的公网端点 "ip:port"；未登记或空闲超时返回空串。"""
+        now = time.time()
+        with self._lock:
+            self._sweep(now)
+            record = self._endpoints.get((room, sid))
+            if record is None:
+                return ""
+            return f"{record.addr[0]}:{record.addr[1]}"
+
+    def evict(self, room: str, sid: str) -> None:
+        with self._lock:
+            record = self._endpoints.pop((room, sid), None)
+            if record is not None and self._addr_map.get(record.addr) == (room, sid):
+                self._addr_map.pop(record.addr, None)
+
+    def evict_room(self, room: str) -> None:
+        with self._lock:
+            for key in [k for k in self._endpoints if k[0] == room]:
+                record = self._endpoints.pop(key, None)
+                if record is not None and self._addr_map.get(record.addr) == key:
+                    self._addr_map.pop(record.addr, None)
+            self._room_bytes.pop(room, None)
+
+    # ---------------------------------------------------------------- 线程生命周期
+    def start(self) -> None:
+        if self._thread is not None or self.port <= 0:
+            return
+        self._thread = threading.Thread(target=self._run, name="p2p-udp-edge", daemon=True)
+        self._thread.start()
+
+    def stop(self, timeout: float = 6.0) -> None:
+        self._stop.set()
+        loop, stopped = self._loop, self._stopped
+        if loop is not None and stopped is not None:
+            try:
+                loop.call_soon_threadsafe(stopped.set)
+            except RuntimeError:
+                pass
+        if self._thread is not None:
+            self._thread.join(timeout)
+            self._thread = None
+
+    def _run(self) -> None:
+        loop = asyncio.new_event_loop()
+        self._loop = loop
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(self._serve())
+        except RuntimeError:
+            pass
+        finally:
+            try:
+                pending = [t for t in asyncio.all_tasks(loop) if not t.done()]
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+                loop.run_until_complete(loop.shutdown_asyncgens())
+            except RuntimeError:
+                pass
+            loop.close()
+            self._loop = None
+
+    async def _serve(self) -> None:
+        loop = asyncio.get_running_loop()
+        self._stopped = asyncio.Event()
+        try:
+            transport, _ = await loop.create_datagram_endpoint(
+                lambda: _EdgeProtocol(self), local_addr=(self.host, self.port),
+            )
+        except OSError:
+            self._stopped = None
+            return
+        self._transport = transport
+        try:
+            if self._stop.is_set():
+                return
+            await self._stopped.wait()
+        finally:
+            transport.close()
+            self._transport = None
+
+    # ------------------------------------------------------------------ 报文处理
+    def _send(self, data: bytes, addr: Any) -> None:
+        transport = self._transport
+        if transport is None:
+            return
+        try:
+            transport.sendto(data, addr)
+        except (OSError, ConnectionError):
+            pass
+
+    def _sweep(self, now: float) -> None:
+        """回收空闲端点与房间字节计数（调用方持锁，最多每 30s 扫一次）。"""
+        if now - self._last_sweep < self._SWEEP_INTERVAL:
+            return
+        self._last_sweep = now
+        for key, record in list(self._endpoints.items()):
+            if now - record.last_seen > self.idle:
+                self._endpoints.pop(key, None)
+                if self._addr_map.get(record.addr) == key:
+                    self._addr_map.pop(record.addr, None)
+        live_rooms = {key[0] for key in self._endpoints}
+        for room in list(self._room_bytes):
+            if room not in live_rooms:
+                self._room_bytes.pop(room, None)
+
+    def _on_datagram(self, data: bytes, addr: Any) -> None:
+        now = time.time()
+        with self._lock:
+            self._sweep(now)
+        if data.startswith(b"HELLO "):
+            self._hello(data[6:].strip(), addr, now)
+            return
+        if data.startswith(b"R "):
+            self._relay(data, addr, now)
+            return
+        self.dropped += 1   # 未知报文：不转发
+
+    def _hello(self, token: bytes, addr: Any, now: float) -> None:
+        try:
+            text = token.decode("ascii")
+        except UnicodeDecodeError:
+            self.dropped += 1
+            return
+        endpoint = f"{addr[0]}:{addr[1]}"
+        grant = self.tokens.claim(text, endpoint)
+        if grant is None:
+            self.dropped += 1
+            self._send(b"ERR bad-token\n", addr)
+            return
+        key = (grant.room, grant.sid)
+        with self._lock:
+            old = self._addr_map.get(addr)
+            if old is not None and old != key:
+                self._endpoints.pop(old, None)
+            self._endpoints[key] = _Endpoint(
+                room=grant.room, sid=grant.sid, vip=grant.vip, addr=addr, last_seen=now,
+            )
+            self._addr_map[addr] = key
+        self._send(f"OK {grant.sid} {grant.vip}\n".encode("ascii"), addr)
+
+    def _relay(self, data: bytes, addr: Any, now: float) -> None:
+        body = data[2:]
+        if len(body) < 32:
+            self.dropped += 1
+            return
+        try:
+            dst_sid = body[:32].decode("ascii")
+        except UnicodeDecodeError:
+            self.dropped += 1
+            return
+        if not _clamp_sid(dst_sid):
+            self.dropped += 1
+            return
+        payload = body[32:]
+        target_addr: Any = None
+        with self._lock:
+            source_key = self._addr_map.get(addr)
+            if source_key is None:
+                self.dropped += 1
+                return
+            room, sid = source_key
+            source = self._endpoints.get(source_key)
+            target = self._endpoints.get((room, dst_sid))
+            if source is None or target is None or dst_sid == sid:
+                self.dropped += 1
+                return
+            used = self._room_bytes.get(room, 0) + len(payload)
+            if self.bytes_cap and used > self.bytes_cap:
+                self.dropped += 1
+                return
+            self._room_bytes[room] = used
+            source.last_seen = now
+            target_addr = target.addr
+        self.forwarded += 1
+        self._send(payload, target_addr)

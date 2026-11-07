@@ -18,6 +18,7 @@ from server_mirror.db import Database
 from server_mirror.default_skin import DEFAULT_SKIN_NAME, default_skin_bytes
 from server_mirror.skins import SkinError, SkinStore
 from server_mirror.ssrf_guard import ServerAddressError, parse_host_port
+from server_mirror.update import request_version, update_info, version_gate
 
 __all__ = ["ApiRouter"]
 
@@ -57,6 +58,7 @@ class ApiRouter:
             or clean.startswith("/skin/")
             or clean.startswith("/p2p/")
             or clean.startswith("/plugin/")
+            or clean == "/update"
             or clean == "/page"
             or clean.startswith("/page/")
         )
@@ -78,6 +80,8 @@ class ApiRouter:
         params = {k: v[0] for k, v in parse_qs(query, keep_blank_values=False).items()}
         if path == "/page" or path.startswith("/page/"):
             return self._serve_page(path)
+        if path == "/update":
+            return self._serve_update()
         if path.startswith("/skin/"):
             return self._serve_skin(method, path, params, headers, body)
         if path.startswith("/p2p/"):
@@ -92,6 +96,15 @@ class ApiRouter:
         if self.page is None or not getattr(self.page, "available", False):
             return _err(404, "看板未构建")
         return self.page.serve(path)
+
+    def _serve_update(self):
+        """``GET /update`` → 301 跳到 GitHub Releases 页面（下载按钮统一入口）。"""
+        info = update_info(self.settings)
+        return 301, {
+            "Location": info.page_url,
+            "Cache-Control": "no-store",
+            "X-OffCraft-Latest-Version": info.latest,
+        }, b""
 
     # --------------------------------------------------------------- /p2p
     def _serve_p2p(self, method: str, path: str, headers: dict[str, str], body, client):
@@ -138,6 +151,13 @@ class ApiRouter:
             if path == "/api/servers/report" and method == "POST":
                 return self._report(body, headers)
             return _err(405, "方法不允许")
+        if path == "/api/update":
+            # 更新查询本身永远放行，老客户端靠它拿到强制更新信息
+            return self._update(params, headers)
+        query = "&".join(f"{k}={v}" for k, v in params.items())
+        blocked = version_gate(self.settings, headers, query)
+        if blocked is not None:
+            return blocked
         if path == "/api/servers/list":
             return self._list(params)
         if path == "/api/servers/detail":
@@ -156,6 +176,13 @@ class ApiRouter:
         if path.startswith("/api/stats/"):
             return self._stats(path.rsplit("/", 1)[1])
         return _err(404, "未知接口")
+
+    def _update(self, params: dict[str, str], headers: dict[str, str]):
+        """``GET /api/update``：返回最新/最低版本、强制更新标记与下载地址。"""
+        info = update_info(self.settings)
+        client = request_version(headers) or str(params.get("v") or params.get("version") or "")
+        client = client.strip().lstrip("vV")[:32]
+        return _json(200, info.payload(client), extra_headers={"Cache-Control": "no-store"})
 
     def _list(self, params: dict[str, str]):
         q = str(params.get("q") or "")[:64]
